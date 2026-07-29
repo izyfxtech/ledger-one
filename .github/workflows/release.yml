@@ -1,78 +1,51 @@
-name: "publish"
-
-# Runs manually (Actions tab → "publish" → "Run workflow") or on every push
-# to the `release` branch. Builds native installers for Windows, macOS
-# (Intel + Apple Silicon) and Linux, then attaches them to a draft GitHub
-# Release for you to review and publish.
+name: Release Multi-Platform App
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - release
+    tags:
+      - 'v*' # Triggers on any tag starting with v, like v1.0.0
 
 jobs:
-  publish-tauri:
+  release:
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: "macos-latest" # Apple Silicon (M1 and above)
-            args: "--target aarch64-apple-darwin"
-          - platform: "macos-latest" # Intel Macs
-            args: "--target x86_64-apple-darwin"
-          - platform: "ubuntu-22.04" # Linux x64 (.deb + .AppImage)
-            args: ""
-          - platform: "windows-latest" # Windows x64 (nsis .exe installer)
-            args: ""
-
+        platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - name: install Linux system dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev patchelf xdg-utils
-
-      - name: setup pnpm
+      # 1. Install PNPM first
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 9 # Adjust this if you use a specific major version of pnpm
 
-      - name: setup node
-        uses: actions/setup-node@v6
+      # 2. Setup Node and use pnpm caching to make builds faster
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: "pnpm"
+          cache: 'pnpm'
 
-      - name: install Rust stable
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          # Apple Silicon + Intel targets are only needed on macOS runners.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Rust build cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./apps/desktop/src-tauri -> target"
+      - name: Install System Dependencies (Ubuntu Only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: install workspace dependencies
-        run: pnpm install --frozen-lockfile
-
-      # apps/desktop/src-tauri/tauri.conf.json already declares
-      # beforeBuildCommand: "pnpm run build", so tauri-action builds the
-      # Vite frontend itself — no separate frontend build step needed here.
-      - uses: tauri-apps/tauri-action@v1
+      # 3. Build using Tauri v2 action
+      - name: Build Frontend and Tauri App
+        uses: tauri-apps/tauri-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: apps/desktop
-          tagName: ledgerone-v__VERSION__
-          releaseName: "LedgerOne v__VERSION__"
-          releaseBody: "See the assets below to download and install this version."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: 'App Release ${{ github.ref_name }}'
+          releaseBody: 'Automated release for version ${{ github.ref_name }}'
+          releaseDraft: true # Creates a draft release on GitHub for you to review
+
