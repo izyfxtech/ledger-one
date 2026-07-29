@@ -44,7 +44,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": ["deb", "appimage", "nsis", "dmg"],
     "category": "Finance",
     "shortDescription": "LedgerOne — local-first finance.",
     "longDescription": "LedgerOne is a local-first financial operating system built around a single immutable ledger.",

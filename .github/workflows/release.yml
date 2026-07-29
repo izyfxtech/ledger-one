@@ -1,0 +1,78 @@
+name: "publish"
+
+# Runs manually (Actions tab → "publish" → "Run workflow") or on every push
+# to the `release` branch. Builds native installers for Windows, macOS
+# (Intel + Apple Silicon) and Linux, then attaches them to a draft GitHub
+# Release for you to review and publish.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # Apple Silicon (M1 and above)
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest" # Intel Macs
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04" # Linux x64 (.deb + .AppImage)
+            args: ""
+          - platform: "windows-latest" # Windows x64 (nsis .exe installer)
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install Linux system dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev patchelf xdg-utils
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: "pnpm"
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Apple Silicon + Intel targets are only needed on macOS runners.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./apps/desktop/src-tauri -> target"
+
+      - name: install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      # apps/desktop/src-tauri/tauri.conf.json already declares
+      # beforeBuildCommand: "pnpm run build", so tauri-action builds the
+      # Vite frontend itself — no separate frontend build step needed here.
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ledgerone-v__VERSION__
+          releaseName: "LedgerOne v__VERSION__"
+          releaseBody: "See the assets below to download and install this version."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
