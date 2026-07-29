@@ -1,0 +1,25 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Dependencies / build output
+node_modules
+dist
+*.local
+
+# Rust build artifacts (src-tauri/ has its own .gitignore for
+# Cargo.lock/target specifics, but this covers any stray build dir)
+target
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

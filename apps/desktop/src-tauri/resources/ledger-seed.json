@@ -1,0 +1,76 @@
+{
+  "currencies": ["NGN", "USD"],
+  "fx": [
+    { "base": "USD", "quote": "USD", "rate": 1 },
+    { "base": "NGN", "quote": "USD", "rate": 0.00066 }
+  ],
+  "domains": [
+    { "id": "personal", "name": "Personal", "kind": "personal" },
+    { "id": "biz_atlas", "name": "Atlas Studio", "kind": "business" }
+  ],
+  "objects": [
+    { "id": "obj_checking", "domainId": "personal", "name": "GTBank Current", "institution": "GTBank", "kind": "account", "currency": "NGN" },
+    { "id": "obj_savings", "domainId": "personal", "name": "Kuda Savings", "institution": "Kuda", "kind": "account", "currency": "NGN" },
+    { "id": "obj_cash", "domainId": "personal", "name": "Cash on hand", "kind": "cash", "currency": "NGN" },
+    { "id": "obj_usd", "domainId": "personal", "name": "USD Wallet", "kind": "wallet", "currency": "USD" },
+    { "id": "obj_cc", "domainId": "personal", "name": "Access Credit Card", "institution": "Access", "kind": "credit_card", "currency": "NGN", "creditLimit": 500000, "minPayment": 15000, "dueDay": 15 },
+    { "id": "obj_biz_bank", "domainId": "biz_atlas", "name": "Atlas Operating", "institution": "Wema", "kind": "account", "currency": "NGN" }
+  ],
+  "categories": [
+    { "id": "cat_salary", "name": "Salary", "type": "income" },
+    { "id": "cat_freelance", "name": "Freelance", "type": "income" },
+    { "id": "cat_food", "name": "Food & Dining", "type": "expense" },
+    { "id": "cat_transport", "name": "Transport", "type": "expense" },
+    { "id": "cat_rent", "name": "Rent & Utilities", "type": "expense" },
+    { "id": "cat_shopping", "name": "Shopping", "type": "expense" },
+    { "id": "cat_subscriptions", "name": "Subscriptions", "type": "expense" }
+  ],
+  "allocations": [
+    { "id": "alc_needs", "domainId": "personal", "name": "Needs", "target": 300000, "targetCurrency": "NGN" },
+    { "id": "alc_wants", "domainId": "personal", "name": "Wants", "target": 100000, "targetCurrency": "NGN" },
+    { "id": "alc_save", "domainId": "personal", "name": "Save & Invest", "target": 150000, "targetCurrency": "NGN" }
+  ],
+  "goals": [
+    { "id": "goal_emergency", "domainId": "personal", "name": "Emergency fund", "target": 1500000, "currency": "NGN", "deadline": "2026-12-31", "priority": "high", "linkedAllocationId": "alc_save" },
+    { "id": "goal_laptop", "domainId": "personal", "name": "New laptop", "target": 1200, "currency": "USD", "deadline": "2027-03-01", "priority": "med" }
+  ],
+  "budgets": [
+    { "id": "bud_202607", "domainId": "personal", "month": "2026-07", "currency": "NGN", "lines": [
+      { "categoryId": "cat_food", "amount": 80000 },
+      { "categoryId": "cat_transport", "amount": 40000 },
+      { "categoryId": "cat_rent", "amount": 200000 },
+      { "categoryId": "cat_shopping", "amount": 40000 },
+      { "categoryId": "cat_subscriptions", "amount": 15000 }
+    ]}
+  ],
+  "transactions": [
+    { "id": "tx_1", "date": "2026-07-01", "description": "Salary — July", "kind": "income", "status": "cleared", "entries": [
+      { "objectId": "obj_checking", "amount": 650000, "categoryId": "cat_salary", "allocationId": "alc_needs" }
+    ]},
+    { "id": "tx_2", "date": "2026-07-02", "description": "Rent", "kind": "expense", "status": "cleared", "entries": [
+      { "objectId": "obj_checking", "amount": -200000, "categoryId": "cat_rent", "allocationId": "alc_needs" }
+    ]},
+    { "id": "tx_3", "date": "2026-07-03", "description": "Groceries — Shoprite", "kind": "expense", "status": "cleared", "entries": [
+      { "objectId": "obj_checking", "amount": -22500, "categoryId": "cat_food", "allocationId": "alc_needs" }
+    ]},
+    { "id": "tx_4", "date": "2026-07-05", "description": "Transfer to savings", "kind": "transfer", "status": "cleared", "entries": [
+      { "objectId": "obj_checking", "amount": -100000, "allocationId": "alc_save" },
+      { "objectId": "obj_savings", "amount": 100000, "allocationId": "alc_save", "goalId": "goal_emergency" }
+    ]},
+    { "id": "tx_5", "date": "2026-07-06", "description": "Uber rides", "kind": "expense", "status": "cleared", "entries": [
+      { "objectId": "obj_checking", "amount": -8500, "categoryId": "cat_transport", "allocationId": "alc_needs" }
+    ]},
+    { "id": "tx_6", "date": "2026-07-08", "description": "Netflix", "kind": "expense", "status": "cleared", "entries": [
+      { "objectId": "obj_cc", "amount": -4900, "categoryId": "cat_subscriptions", "allocationId": "alc_wants" }
+    ]},
+    { "id": "tx_7", "date": "2026-07-10", "description": "Freelance retainer — Atlas client", "kind": "income", "status": "cleared", "entries": [
+      { "objectId": "obj_usd", "amount": 400, "categoryId": "cat_freelance", "allocationId": "alc_save", "goalId": "goal_laptop" }
+    ]},
+    { "id": "tx_8", "date": "2026-07-12", "description": "Dinner out", "kind": "expense", "status": "cleared", "entries": [
+      { "objectId": "obj_cash", "amount": -12000, "categoryId": "cat_food", "allocationId": "alc_wants" }
+    ]},
+    { "id": "tx_9", "date": "2026-07-14", "description": "Client invoice — Atlas Studio", "kind": "income", "status": "cleared", "entries": [
+      { "objectId": "obj_biz_bank", "amount": 850000, "categoryId": "cat_freelance" }
+    ]}
+  ]
+}

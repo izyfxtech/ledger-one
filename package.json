@@ -1,0 +1,22 @@
+{
+  "name": "ledgerone",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @ledgerone/desktop dev",
+    "build": "pnpm --filter @ledgerone/desktop build",
+    "build:dev": "pnpm --filter @ledgerone/desktop build:dev",
+    "lint": "pnpm --filter '*' lint",
+    "test": "pnpm --filter @ledgerone/desktop test",
+    "db:generate": "pnpm --filter @ledgerone/db generate",
+    "tauri:dev": "pnpm --filter @ledgerone/desktop tauri:dev",
+    "tauri:build": "pnpm --filter @ledgerone/desktop tauri:build"
+  },
+  "overrides": {
+    "postcss": "8.5.19"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
