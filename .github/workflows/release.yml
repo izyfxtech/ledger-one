@@ -38,9 +38,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # 3. Build using Tauri v2 action
+      # 3. Build using official Tauri action
       - name: Build Frontend and Tauri App
-        uses: tauri-apps/tauri-action@v2
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -48,4 +48,3 @@ jobs:
           releaseName: 'App Release ${{ github.ref_name }}'
           releaseBody: 'Automated release for version ${{ github.ref_name }}'
           releaseDraft: true # Creates a draft release on GitHub for you to review
-
