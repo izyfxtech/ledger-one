@@ -1,6 +1,8 @@
 // no router import needed
-import { useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
+import { Link as RouterLink, useSearch } from "@tanstack/react-router";
+import { todayLocal } from "@/lib/dates";
+import { saveTextFile } from "@/lib/files";
 import { toast } from "sonner";
 import {
   Bar,
@@ -16,15 +18,18 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { DataTable } from "@/components/data-table";
 import { EmptyState, PageContainer, PageHeader, SectionTitle, Stat } from "@/components/page";
-import { useLedger } from "@/lib/ledger";
+import { ledgerQuery, useLedgerState } from "@/lib/ledger";
 import { accountsToCsv, transactionsToCsv } from "@/lib/ledger/csv";
 import {
+  allocationBalance,
   balanceOf,
   budgetSpent,
   convert,
   domainMetrics,
   formatMoney,
+  goalProgress,
   isAsset,
   isLiability,
   monthlyCashFlow,
@@ -35,7 +40,6 @@ import type { Budget, LedgerState } from "@/lib/ledger/types";
 
 const TABS = [
   "Overview",
-  "Net Worth",
   "Cash Flow",
   "Balance Sheet",
   "Income Statement",
@@ -62,10 +66,14 @@ function useDisplay(state: LedgerState) {
 }
 
 export default function ReportsPage() {
-
-  const [tab, setTab] = useState<Tab>("Overview");
-  const { state } = useLedger();
-  const ws = useMemo(() => workspaceMetrics(state), [state]);
+  // Active tab lives in the URL (?tab=Cash Flow) rather than useState.
+  const { tab: requested } = useSearch({ strict: false }) as { tab?: string };
+  const tab: Tab = (TABS as readonly string[]).includes(requested ?? "")
+    ? (requested as Tab)
+    : "Overview";
+  const state = useLedgerState();
+  // `select` is memoized per cache entry — replaces useMemo(…, [state]).
+  const { data: ws } = useSuspenseQuery({ ...ledgerQuery, select: workspaceMetrics });
   const { disp } = useDisplay(state);
 
   return (
@@ -73,14 +81,15 @@ export default function ReportsPage() {
       <PageHeader
         eyebrow="Reports"
         title="Workspace reports"
-        description="Read-only views across every domain. Filter by date, domain, currency, category, or account."
+        description="Read-only views across every workspace, in your reporting currency. Date and category filters are not available yet."
       />
 
       <div className="flex flex-wrap gap-1 border-b border-border mb-8">
         {TABS.map((t) => (
-          <button
+          <RouterLink
             key={t}
-            onClick={() => setTab(t)}
+            to="/reports"
+            search={{ tab: t }}
             className={[
               "px-3 py-2 text-sm border-b-2 -mb-px transition-colors",
               tab === t
@@ -89,7 +98,7 @@ export default function ReportsPage() {
             ].join(" ")}
           >
             {t}
-          </button>
+          </RouterLink>
         ))}
       </div>
 
@@ -101,23 +110,24 @@ export default function ReportsPage() {
             tone={ws.netWorth >= 0 ? "pos" : "neg"}
           />
           <Stat label="Total assets" value={disp(ws.assets)} />
-          <Stat
-            label="Total liabilities"
-            value={disp(ws.liabilities)}
-            tone="neg"
-          />
-          <Stat
-            label="Cash available"
-            value={disp(ws.cashAvailable)}
-          />
+          <Stat label="Total liabilities" value={disp(ws.liabilities)} tone="neg" />
+          <Stat label="Cash available" value={disp(ws.cashAvailable)} />
         </div>
       )}
 
       {tab === "Overview" && <NetWorthByDomain />}
-      {tab === "Net Worth" && <NetWorthByDomain />}
       {tab === "Cash Flow" && <CashFlowReport />}
       {tab === "Balance Sheet" && <BalanceSheet />}
-      {tab === "Income Statement" && <IncomeStatement />}
+      {tab === "Income Statement" && (
+        <>
+          <p className="text-xs text-muted-foreground mb-4">
+            Cash basis: money in and out of liquid accounts. Transfers, currency exchanges, opening
+            balances and borrowed principal are excluded; credit-card spending counts when the card
+            is paid.
+          </p>
+          <IncomeStatement />
+        </>
+      )}
       {tab === "Budget" && <BudgetReport />}
       {tab === "Allocation" && <AllocationReport />}
       {tab === "Goal" && <GoalReport />}
@@ -129,7 +139,7 @@ export default function ReportsPage() {
 }
 
 function NetWorthByDomain() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { wdc, disp } = useDisplay(state);
   const rows = state.domains.map((d) => {
     const m = domainMetrics(state, d.id);
@@ -153,7 +163,7 @@ function NetWorthByDomain() {
                 border: "1px solid var(--color-border)",
                 fontSize: 12,
               }}
-              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as any}
+              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as never}
             />
             <Bar dataKey="netWorth" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
           </BarChart>
@@ -164,7 +174,7 @@ function NetWorthByDomain() {
 }
 
 function CashFlowReport() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { wdc } = useDisplay(state);
   const monthly = new Map<string, { income: number; expense: number }>();
   for (const d of state.domains) {
@@ -198,11 +208,29 @@ function CashFlowReport() {
                 border: "1px solid var(--color-border)",
                 fontSize: 12,
               }}
-              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as any}
+              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as never}
             />
-            <Line type="monotone" dataKey="income" stroke="var(--color-pos)" dot={false} strokeWidth={2} />
-            <Line type="monotone" dataKey="expense" stroke="var(--color-neg)" dot={false} strokeWidth={2} />
-            <Line type="monotone" dataKey="net" stroke="var(--color-primary)" dot={false} strokeWidth={2} />
+            <Line
+              type="monotone"
+              dataKey="income"
+              stroke="var(--color-pos)"
+              dot={false}
+              strokeWidth={2}
+            />
+            <Line
+              type="monotone"
+              dataKey="expense"
+              stroke="var(--color-neg)"
+              dot={false}
+              strokeWidth={2}
+            />
+            <Line
+              type="monotone"
+              dataKey="net"
+              stroke="var(--color-primary)"
+              dot={false}
+              strokeWidth={2}
+            />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -211,7 +239,7 @@ function CashFlowReport() {
 }
 
 function BalanceSheet() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { disp } = useDisplay(state);
   const rows = state.domains.map((d) => {
     const m = domainMetrics(state, d.id);
@@ -220,48 +248,55 @@ function BalanceSheet() {
   return (
     <section className="mb-10">
       <SectionTitle>Balance sheet · workspace</SectionTitle>
-      <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-[10px] uppercase tracking-widest text-muted-foreground">
-            <tr>
-              <th className="text-left px-4 py-2 font-medium">Domain</th>
-              <th className="text-right px-4 py-2 font-medium">Assets</th>
-              <th className="text-right px-4 py-2 font-medium">Liabilities</th>
-              <th className="text-right px-4 py-2 font-medium">Liquid</th>
-              <th className="text-right px-4 py-2 font-medium">Net worth</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.name} className="border-t border-border">
-                <td className="px-4 py-2.5">{r.name}</td>
-                <td className="px-4 py-2.5 text-right num">{disp(r.assets)}</td>
-                <td className="px-4 py-2.5 text-right num text-neg">
-                  {disp(r.liabilities)}
-                </td>
-                <td className="px-4 py-2.5 text-right num">{disp(r.liquid)}</td>
-                <td
-                  className={[
-                    "px-4 py-2.5 text-right num font-medium",
-                    r.netWorth >= 0 ? "text-pos" : "text-neg",
-                  ].join(" ")}
-                >
-                  {disp(r.netWorth)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        data={rows}
+        getRowId={(r) => r.name}
+        columns={[
+          { id: "name", header: "Domain", accessorFn: (r) => r.name },
+          {
+            id: "assets",
+            header: "Assets",
+            accessorFn: (r) => r.assets,
+            cell: ({ getValue }) => disp(getValue<number>()),
+            className: "num text-right",
+          },
+          {
+            id: "liabilities",
+            header: "Liabilities",
+            accessorFn: (r) => r.liabilities,
+            cell: ({ getValue }) => disp(getValue<number>()),
+            className: "num text-right text-neg",
+          },
+          {
+            id: "liquid",
+            header: "Liquid",
+            accessorFn: (r) => r.liquid,
+            cell: ({ getValue }) => disp(getValue<number>()),
+            className: "num text-right",
+          },
+          {
+            id: "netWorth",
+            header: "Net worth",
+            accessorFn: (r) => r.netWorth,
+            cell: ({ row: { original: r }, getValue }) => (
+              <span className={r.netWorth >= 0 ? "text-pos" : "text-neg"}>
+                {disp(getValue<number>())}
+              </span>
+            ),
+            className: "num text-right font-medium",
+          },
+        ]}
+      />
     </section>
   );
 }
 
 function IncomeStatement() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { disp } = useDisplay(state);
   const rows = state.domains.map((d) => {
-    let income = 0, expense = 0;
+    let income = 0,
+      expense = 0;
     for (const row of monthlyCashFlow(state, d.id)) {
       income += row.income;
       expense += row.expense;
@@ -271,36 +306,44 @@ function IncomeStatement() {
   return (
     <section className="mb-10">
       <SectionTitle>Income statement · lifetime</SectionTitle>
-      <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-[10px] uppercase tracking-widest text-muted-foreground">
-            <tr>
-              <th className="text-left px-4 py-2 font-medium">Domain</th>
-              <th className="text-right px-4 py-2 font-medium">Income</th>
-              <th className="text-right px-4 py-2 font-medium">Expense</th>
-              <th className="text-right px-4 py-2 font-medium">Net</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.name} className="border-t border-border">
-                <td className="px-4 py-2.5">{r.name}</td>
-                <td className="px-4 py-2.5 text-right num text-pos">+{disp(r.income)}</td>
-                <td className="px-4 py-2.5 text-right num text-neg">−{disp(r.expense)}</td>
-                <td className={["px-4 py-2.5 text-right num font-medium", r.net >= 0 ? "text-pos" : "text-neg"].join(" ")}>
-                  {disp(r.net)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        data={rows}
+        getRowId={(r) => r.name}
+        columns={[
+          { id: "name", header: "Domain", accessorFn: (r) => r.name },
+          {
+            id: "income",
+            header: "Income",
+            accessorFn: (r) => r.income,
+            cell: ({ getValue }) => `+${disp(getValue<number>())}`,
+            className: "num text-right text-pos",
+          },
+          {
+            id: "expense",
+            header: "Expense",
+            accessorFn: (r) => r.expense,
+            cell: ({ getValue }) => `−${disp(getValue<number>())}`,
+            className: "num text-right text-neg",
+          },
+          {
+            id: "net",
+            header: "Net",
+            accessorFn: (r) => r.net,
+            cell: ({ row: { original: r }, getValue }) => (
+              <span className={r.net >= 0 ? "text-pos" : "text-neg"}>
+                {disp(getValue<number>())}
+              </span>
+            ),
+            className: "num text-right font-medium",
+          },
+        ]}
+      />
     </section>
   );
 }
 
 function BudgetReport() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const budgets = [...state.budgets].sort((a, b) => b.month.localeCompare(a.month));
 
   return (
@@ -323,7 +366,7 @@ function BudgetReport() {
 }
 
 function BudgetCard({ budget }: { budget: Budget }) {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const domain = state.domains.find((d) => d.id === budget.domainId);
   const rows = budget.lines.map((line) => {
     const category = state.categories.find((c) => c.id === line.categoryId);
@@ -351,7 +394,12 @@ function BudgetCard({ budget }: { budget: Budget }) {
           <div className="text-xs text-muted-foreground">{budget.month}</div>
         </div>
         <div className="text-right">
-          <div className={["num text-sm font-medium", totalSpent > totalPlanned ? "text-neg" : ""].join(" ")}>
+          <div
+            className={[
+              "num text-sm font-medium",
+              totalSpent > totalPlanned ? "text-neg" : "",
+            ].join(" ")}
+          >
             {formatMoney(totalSpent, budget.currency, { compact: true })}
             {" / "}
             {formatMoney(totalPlanned, budget.currency, { compact: true })}
@@ -360,61 +408,79 @@ function BudgetCard({ budget }: { budget: Budget }) {
         </div>
       </div>
       {rows.length === 0 ? (
-        <div className="px-4 py-6 text-sm text-muted-foreground">No category lines on this budget.</div>
+        <div className="px-4 py-6 text-sm text-muted-foreground">
+          No category lines on this budget.
+        </div>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
-            <tr>
-              <th className="text-left px-4 py-2 font-medium">Category</th>
-              <th className="text-right px-4 py-2 font-medium">Planned</th>
-              <th className="text-right px-4 py-2 font-medium">Spent</th>
-              <th className="text-right px-4 py-2 font-medium">Remaining</th>
-              <th className="text-left px-4 py-2 font-medium w-32">Progress</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.key} className="border-t border-border">
-                <td className="px-4 py-2.5">{r.name}</td>
-                <td className="px-4 py-2.5 text-right num">
-                  {formatMoney(r.planned, budget.currency, { compact: true })}
-                </td>
-                <td className={["px-4 py-2.5 text-right num", r.over ? "text-neg" : ""].join(" ")}>
-                  {formatMoney(r.spent, budget.currency, { compact: true })}
-                </td>
-                <td className={["px-4 py-2.5 text-right num", r.remaining < 0 ? "text-neg" : "text-pos"].join(" ")}>
-                  {formatMoney(r.remaining, budget.currency, { compact: true, signed: true })}
-                </td>
-                <td className="px-4 py-2.5">
-                  <div className="h-1.5 w-full max-w-28 rounded-full bg-muted overflow-hidden">
-                    <div
-                      className={["h-full rounded-full", r.over ? "bg-neg" : "bg-primary"].join(" ")}
-                      style={{ width: `${Math.min(100, Math.max(0, r.pct))}%` }}
-                    />
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <DataTable
+          bare
+          data={rows}
+          getRowId={(r) => r.key}
+          columns={[
+            { id: "name", header: "Category", accessorFn: (r) => r.name },
+            {
+              id: "planned",
+              header: "Planned",
+              accessorFn: (r) => r.planned,
+              cell: ({ getValue }) =>
+                formatMoney(getValue<number>(), budget.currency, { compact: true }),
+              className: "num text-right",
+            },
+            {
+              id: "spent",
+              header: "Spent",
+              accessorFn: (r) => r.spent,
+              cell: ({ row: { original: r }, getValue }) => (
+                <span className={r.over ? "text-neg" : ""}>
+                  {formatMoney(getValue<number>(), budget.currency, { compact: true })}
+                </span>
+              ),
+              className: "num text-right",
+            },
+            {
+              id: "remaining",
+              header: "Remaining",
+              accessorFn: (r) => r.remaining,
+              cell: ({ row: { original: r }, getValue }) => (
+                <span className={r.remaining < 0 ? "text-neg" : "text-pos"}>
+                  {formatMoney(getValue<number>(), budget.currency, {
+                    compact: true,
+                    signed: true,
+                  })}
+                </span>
+              ),
+              className: "num text-right",
+            },
+            {
+              id: "progress",
+              header: "Progress",
+              enableSorting: false,
+              className: "w-32",
+              cell: ({ row: { original: r } }) => (
+                <div className="h-1.5 w-full max-w-28 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={["h-full rounded-full", r.over ? "bg-neg" : "bg-primary"].join(" ")}
+                    style={{ width: `${Math.min(100, Math.max(0, r.pct))}%` }}
+                  />
+                </div>
+              ),
+            },
+          ]}
+        />
       )}
     </div>
   );
 }
 
 function AllocationReport() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { wdc } = useDisplay(state);
-  const rows = state.allocations.map((a) => {
-    let usd = 0;
-    for (const t of state.transactions)
-      for (const e of t.entries)
-        if (e.allocationId === a.id) {
-          const obj = state.objects.find((o) => o.id === e.objectId);
-          if (obj) usd += convert(state, e.amount, obj.currency, "USD");
-        }
-    return { name: a.name, amount: Math.max(0, convert(state, usd, "USD", wdc)) };
-  });
+  // allocationBalance skips void transactions; the inline loop this replaced
+  // did not, so voiding an allocation entry left this report unchanged.
+  const rows = state.allocations.map((a) => ({
+    name: a.name,
+    amount: Math.max(0, convert(state, allocationBalance(state, a.id), "USD", wdc)),
+  }));
   return (
     <section className="mb-10">
       <SectionTitle>Allocations · workspace</SectionTitle>
@@ -423,14 +489,20 @@ function AllocationReport() {
           <BarChart data={rows} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" horizontal={false} />
             <XAxis type="number" tick={{ fontSize: 11 }} stroke="var(--color-muted-foreground)" />
-            <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} stroke="var(--color-muted-foreground)" width={140} />
+            <YAxis
+              type="category"
+              dataKey="name"
+              tick={{ fontSize: 11 }}
+              stroke="var(--color-muted-foreground)"
+              width={140}
+            />
             <Tooltip
               contentStyle={{
                 background: "var(--color-background)",
                 border: "1px solid var(--color-border)",
                 fontSize: 12,
               }}
-              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as any}
+              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as never}
             />
             <Bar dataKey="amount" fill="var(--color-primary)" radius={[0, 4, 4, 0]} />
           </BarChart>
@@ -441,20 +513,44 @@ function AllocationReport() {
 }
 
 function GoalReport() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   return (
     <section className="mb-10">
       <SectionTitle>Goal progress</SectionTitle>
+      {state.goals.length === 0 && (
+        <EmptyState
+          title="No goals yet"
+          description="Create a goal from a workspace's Goals tab."
+        />
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {state.goals.map((g) => {
+          const { current, pct } = goalProgress(state, g.id);
+          const shown = convert(state, current, "USD", g.currency);
           return (
             <div key={g.id} className="border border-border rounded-lg p-4">
               <div className="flex items-center justify-between">
                 <div className="font-medium">{g.name}</div>
-                <div className="text-xs text-muted-foreground">by {g.deadline ?? "—"}</div>
+                <div className="text-xs text-muted-foreground">
+                  by{" "}
+                  {g.deadline
+                    ? new Date(g.deadline.slice(0, 10)).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                        timeZone: "UTC",
+                      })
+                    : "—"}
+                </div>
               </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                target {formatMoney(g.target, g.currency, { compact: true })}
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden mt-3">
+                <div className="h-full bg-foreground" style={{ width: `${pct * 100}%` }} />
+              </div>
+              <div className="flex justify-between text-xs text-muted-foreground mt-2 num">
+                <span>
+                  {formatMoney(shown, g.currency, { compact: true })} · {Math.round(pct * 100)}%
+                </span>
+                <span>target {formatMoney(g.target, g.currency, { compact: true })}</span>
               </div>
             </div>
           );
@@ -465,7 +561,7 @@ function GoalReport() {
 }
 
 function BusinessComparison() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { wdc } = useDisplay(state);
   const businesses = state.domains.filter((d) => d.kind !== "personal");
   const rows = businesses.map((d) => {
@@ -491,7 +587,7 @@ function BusinessComparison() {
                 border: "1px solid var(--color-border)",
                 fontSize: 12,
               }}
-              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as any}
+              formatter={((v: number) => formatMoney(v, wdc, { compact: true })) as never}
             />
             <Bar dataKey="assets" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
             <Bar dataKey="liabilities" fill="var(--color-neg)" radius={[4, 4, 0, 0]} />
@@ -503,7 +599,7 @@ function BusinessComparison() {
 }
 
 function CurrencyExposure() {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const { wdc } = useDisplay(state);
   const byCcy = new Map<string, number>();
   for (const o of state.objects) {
@@ -513,15 +609,30 @@ function CurrencyExposure() {
     const inWdc = convert(state, b, o.currency, wdc);
     byCcy.set(o.currency, (byCcy.get(o.currency) ?? 0) + inWdc);
   }
-  const data = Array.from(byCcy.entries()).map(([name, value]) => ({ name, value: Math.max(0, value) }));
-  const colors = ["var(--color-primary)", "var(--color-pos)", "var(--color-neg)", "var(--color-muted-foreground)"];
+  const data = Array.from(byCcy.entries()).map(([name, value]) => ({
+    name,
+    value: Math.max(0, value),
+  }));
+  const colors = [
+    "var(--color-primary)",
+    "var(--color-pos)",
+    "var(--color-neg)",
+    "var(--color-muted-foreground)",
+  ];
   return (
     <section className="mb-10">
       <SectionTitle>Currency exposure (assets)</SectionTitle>
       <div className="border border-border rounded-lg p-4">
         <ResponsiveContainer width="100%" height={300}>
           <PieChart>
-            <Pie data={data} dataKey="value" nameKey="name" innerRadius={60} outerRadius={110} paddingAngle={2}>
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="name"
+              innerRadius={60}
+              outerRadius={110}
+              paddingAngle={2}
+            >
               {data.map((_, i) => (
                 <Cell key={i} fill={colors[i % colors.length]} />
               ))}
@@ -532,7 +643,9 @@ function CurrencyExposure() {
                 border: "1px solid var(--color-border)",
                 fontSize: 12,
               }}
-              formatter={((v: number, n: string) => [formatMoney(v, wdc, { compact: true }), n]) as any}
+              formatter={
+                ((v: number, n: string) => [formatMoney(v, wdc, { compact: true }), n]) as never
+              }
             />
           </PieChart>
         </ResponsiveContainer>
@@ -542,34 +655,35 @@ function CurrencyExposure() {
 }
 
 function ExportsPanel() {
-  const { state } = useLedger();
-  const [busy, setBusy] = useState<string | null>(null);
+  const state = useLedgerState();
 
-  const saveCsv = async (label: string, filename: string, content: string) => {
-    setBusy(label);
-    try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: filename,
-        filters: [{ name: "CSV", extensions: ["csv"] }],
+  const save = useMutation({
+    mutationFn: async (x: { label: string; filename: string; content: string }) => {
+      const saved = await saveTextFile({
+        defaultName: x.filename,
+        content: x.content,
+        filter: { name: "CSV", extensions: ["csv"] },
+        mime: "text/csv;charset=utf-8",
       });
-      if (!path) return; // cancelled
-      await invoke("write_export_file", { path, content });
-      toast.success(`${label} saved`);
-    } catch (err) {
-      console.error(`[export] ${label} failed:`, err);
-      toast.error(`Couldn't save ${label}`);
-    } finally {
-      setBusy(null);
-    }
-  };
+      return saved ? x.label : null; // null = cancelled
+    },
+    onSuccess: (label) => label && toast.success(`${label} saved`),
+    onError: (err, x) => {
+      console.error(`[export] ${x.label} failed:`, err);
+      toast.error(`Couldn't save ${x.label}`);
+    },
+  });
+  const busy = save.isPending ? save.variables.label : null;
+  const saveCsv = (label: string, filename: string, content: string) =>
+    save.mutate({ label, filename, content });
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const csvExports = [
     {
       label: "CSV — Transactions",
       hint: "Every entry, one row each, with domain/account/category.",
-      onClick: () => saveCsv("Transactions", `ledgerone-transactions-${today}.csv`, transactionsToCsv(state)),
+      onClick: () =>
+        saveCsv("Transactions", `ledgerone-transactions-${today}.csv`, transactionsToCsv(state)),
     },
     {
       label: "CSV — Accounts",
@@ -577,12 +691,14 @@ function ExportsPanel() {
       onClick: () => saveCsv("Accounts", `ledgerone-accounts-${today}.csv`, accountsToCsv(state)),
     },
   ];
-  const comingSoon = ["PDF — Balance Sheet", "PDF — Income Statement"];
 
   return (
     <section className="mb-10 grid gap-3 md:grid-cols-2">
       {csvExports.map((x) => (
-        <div key={x.label} className="border border-border rounded-lg p-5 flex items-center justify-between">
+        <div
+          key={x.label}
+          className="border border-border rounded-lg p-5 flex items-center justify-between"
+        >
           <div>
             <div className="font-medium">{x.label}</div>
             <div className="text-xs text-muted-foreground mt-1">{x.hint}</div>
@@ -597,23 +713,6 @@ function ExportsPanel() {
           </button>
         </div>
       ))}
-      {comingSoon.map((x) => (
-        <div key={x} className="border border-border rounded-lg p-5 flex items-center justify-between opacity-60">
-          <div>
-            <div className="font-medium">{x}</div>
-            <div className="text-xs text-muted-foreground mt-1">Not built yet.</div>
-          </div>
-          <button
-            type="button"
-            disabled
-            title="Coming soon"
-            className="text-sm px-3 py-1.5 rounded-md border border-border cursor-not-allowed"
-          >
-            Coming soon
-          </button>
-        </div>
-      ))}
     </section>
   );
 }
-

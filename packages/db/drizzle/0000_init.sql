@@ -10,8 +10,9 @@
 -- Rust owns all SQL execution and the frontend never talks to SQLite
 -- itself.
 --
--- It represents the shape emitted by `drizzle-kit generate` for the schema
--- in `packages/db/src/schema.ts`. Regenerate rather than hand-edit.
+-- Hand-written to match `packages/db/src/schema.ts` (there is no drizzle-kit
+-- journal). Already-applied migrations never re-run, so later changes live in
+-- new numbered files (see 0001_*, 0002_*), not edits to this one.
 
 CREATE TABLE IF NOT EXISTS domains (
   id   TEXT PRIMARY KEY,

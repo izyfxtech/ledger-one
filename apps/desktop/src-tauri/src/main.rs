@@ -10,8 +10,8 @@
 // truth for the schema — the same files are embedded here via
 // `include_str!` and run as migrations on boot (see `db::MIGRATIONS`).
 //
-// Rust also owns: seeding/resetting the demo workspace from the
-// compile-time-embedded seed ledger, reading/writing the actual bytes for
+// Rust also owns: initialising/resetting the workspace to an empty
+// baseline (no demo data), reading/writing the actual bytes for
 // Export/Import once the frontend has picked a path via a native dialog,
 // and resolving the OS-standard app-data directory for "Show database
 // file". It has no opinions about balances or reports — those are derived
@@ -86,7 +86,7 @@ fn main() {
             write_export_file,
             read_import_file,
             get_db_path,
-            db::db_ensure_seeded,
+            db::db_ensure_initialized,
             db::db_select_ledger_state,
             db::db_insert_domain,
             db::db_update_domain,
@@ -98,6 +98,14 @@ fn main() {
             db::db_insert_goal,
             db::db_insert_budget,
             db::db_insert_category,
+            db::db_update_category,
+            db::db_delete_category,
+            db::db_update_goal,
+            db::db_delete_goal,
+            db::db_update_allocation,
+            db::db_delete_allocation,
+            db::db_update_budget,
+            db::db_delete_budget,
             db::db_insert_transaction,
             db::db_update_transaction,
             db::db_delete_transaction,
@@ -109,6 +117,7 @@ fn main() {
             db::db_set_setting,
             db::db_replace_ledger,
             db::db_reset_workspace,
+            db::db_apply_remote_changes,
         ])
         .setup(|app| {
             use tauri::Manager;

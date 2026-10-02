@@ -1,6 +1,7 @@
-import { Link } from "react-router-dom";
+import { Link } from "@/components/app-link";
 import {
-  useLedger,
+  useLedgerState,
+  useLedgerActions,
   formatMoney,
   balanceOf,
   transactionsForObject,
@@ -14,6 +15,13 @@ import type { CurrencyCode, Transaction, TransactionStatus } from "@/lib/ledger"
 import { canPerform } from "@/lib/local-store";
 import { PageContainer, SectionTitle, Stat, EmptyState, Hero, HeroMeta } from "./page";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import {
+  AccountActions,
+  AllocationActions,
+  GoalActions,
+  TransactionActions,
+} from "./entity-actions";
+import { useState } from "react";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 const STATUS_OPTIONS: { value: TransactionStatus; label: string; hint: string }[] = [
@@ -36,7 +44,7 @@ function BackLink({ to, label }: { to: string; label: string }) {
 }
 
 function TxnRow({ t, highlightObjectId }: { t: Transaction; highlightObjectId?: string }) {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const entry =
     (highlightObjectId && t.entries.find((e) => e.objectId === highlightObjectId)) || t.entries[0];
   const obj = state.objects.find((o) => o.id === entry.objectId);
@@ -49,11 +57,12 @@ function TxnRow({ t, highlightObjectId }: { t: Transaction; highlightObjectId?: 
         voided ? "opacity-50" : "",
       ].join(" ")}
     >
-
       <span className="num text-xs text-muted-foreground w-14">
         {new Date(t.date).toLocaleDateString("en-US", { month: "short", day: "2-digit" })}
       </span>
-      <span className={["flex-1 truncate", voided ? "line-through" : ""].join(" ")}>{t.description}</span>
+      <span className={["flex-1 truncate", voided ? "line-through" : ""].join(" ")}>
+        {t.description}
+      </span>
       {voided && (
         <span className="text-[10px] uppercase tracking-widest text-muted-foreground border border-border rounded-md px-1.5 py-0.5">
           Void
@@ -75,13 +84,16 @@ function TxnRow({ t, highlightObjectId }: { t: Transaction; highlightObjectId?: 
 }
 
 export function AccountDetail({ objectId, basePath }: { objectId: string; basePath: string }) {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const obj = state.objects.find((o) => o.id === objectId);
   if (!obj) {
     return (
       <PageContainer>
         <BackLink to={basePath + "/accounts"} label="Back to accounts" />
-        <EmptyState title="Account not found" description="This financial object doesn't exist in the workspace." />
+        <EmptyState
+          title="Account not found"
+          description="This financial object doesn't exist in the workspace."
+        />
       </PageContainer>
     );
   }
@@ -89,8 +101,7 @@ export function AccountDetail({ objectId, basePath }: { objectId: string; basePa
   const usd = convert(state, bal, obj.currency, "USD");
   const txns = transactionsForObject(state, obj.id);
   const liability = isLiability(obj);
-  const backLabel =
-    liability ? "Back to liabilities" : "Back to accounts";
+  const backLabel = liability ? "Back to liabilities" : "Back to accounts";
   const backTo = liability ? basePath + "/liabilities" : basePath + "/accounts";
 
   return (
@@ -99,7 +110,8 @@ export function AccountDetail({ objectId, basePath }: { objectId: string; basePa
       <Hero
         eyebrow={obj.institution ?? obj.kind.replace("_", " ")}
         title={obj.name}
-        value={formatMoney(bal, obj.currency, { compact: true })}
+        actions={<AccountActions object={obj} basePath={basePath} />}
+        value={formatMoney(liability ? -bal : bal, obj.currency, { compact: true })}
         valueTone={liability ? "neg" : bal < 0 ? "neg" : "default"}
         valueHint={
           liability
@@ -109,24 +121,31 @@ export function AccountDetail({ objectId, basePath }: { objectId: string; basePa
         meta={
           <>
             {obj.currency !== "USD" && (
-              <HeroMeta label="≈ USD" value={formatMoney(usd, "USD", { compact: true })} />
+              <HeroMeta
+                label="≈ USD"
+                value={formatMoney(liability ? -usd : usd, "USD", { compact: true })}
+              />
             )}
             <HeroMeta label="Currency" value={obj.currency} />
             {obj.creditLimit != null && (
               <HeroMeta
                 label="Utilization"
-                value={`${Math.round((Math.max(0, bal) / obj.creditLimit) * 100)}%`}
+                value={`${obj.creditLimit > 0 ? Math.round((Math.max(0, -bal) / obj.creditLimit) * 100) : 0}%`}
               />
             )}
-            {obj.interestRate != null && <HeroMeta label="Interest" value={`${obj.interestRate}%`} />}
+            {obj.interestRate != null && (
+              <HeroMeta label="Interest" value={`${obj.interestRate}%`} />
+            )}
             {obj.minPayment != null && (
-              <HeroMeta label="Min payment" value={formatMoney(obj.minPayment, obj.currency, { compact: true })} />
+              <HeroMeta
+                label="Min payment"
+                value={formatMoney(obj.minPayment, obj.currency, { compact: true })}
+              />
             )}
             {obj.dueDay != null && <HeroMeta label="Due day" value={`Day ${obj.dueDay}`} />}
           </>
         }
       />
-
 
       <SectionTitle>Ledger history</SectionTitle>
       {txns.length === 0 ? (
@@ -142,8 +161,14 @@ export function AccountDetail({ objectId, basePath }: { objectId: string; basePa
   );
 }
 
-export function AllocationDetail({ allocationId, basePath }: { allocationId: string; basePath: string }) {
-  const { state } = useLedger();
+export function AllocationDetail({
+  allocationId,
+  basePath,
+}: {
+  allocationId: string;
+  basePath: string;
+}) {
+  const state = useLedgerState();
   const a = state.allocations.find((x) => x.id === allocationId);
   if (!a) {
     return (
@@ -167,7 +192,10 @@ export function AllocationDetail({ allocationId, basePath }: { allocationId: str
       <Hero
         eyebrow="Allocation"
         title={a.name}
-        value={formatMoney(convert(state, balUsd, "USD", a.targetCurrency), a.targetCurrency, { compact: true })}
+        actions={<AllocationActions allocation={a} basePath={basePath} />}
+        value={formatMoney(convert(state, balUsd, "USD", a.targetCurrency), a.targetCurrency, {
+          compact: true,
+        })}
         valueHint={
           pct != null
             ? `${Math.round(pct * 100)}% of ${formatMoney(a.target!, a.targetCurrency, { compact: true })} target`
@@ -176,7 +204,10 @@ export function AllocationDetail({ allocationId, basePath }: { allocationId: str
         meta={
           <>
             {a.target != null && (
-              <HeroMeta label="Target" value={formatMoney(a.target, a.targetCurrency, { compact: true })} />
+              <HeroMeta
+                label="Target"
+                value={formatMoney(a.target, a.targetCurrency, { compact: true })}
+              />
             )}
             <HeroMeta label="Currency" value={a.targetCurrency} />
             {a.targetCurrency !== "USD" && (
@@ -186,10 +217,12 @@ export function AllocationDetail({ allocationId, basePath }: { allocationId: str
         }
       />
 
-
       <SectionTitle>Held across</SectionTitle>
       {byAccount.length === 0 ? (
-        <EmptyState title="No funds allocated yet" description="Flag any ledger entry with this allocation to reserve funds." />
+        <EmptyState
+          title="No funds allocated yet"
+          description="Flag any ledger entry with this allocation to reserve funds."
+        />
       ) : (
         <div className="border border-border rounded-lg bg-card divide-y divide-border overflow-hidden mb-10">
           {byAccount.map(({ objectId, amount }) => {
@@ -227,7 +260,10 @@ export function AllocationDetail({ allocationId, basePath }: { allocationId: str
 }
 
 export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: string }) {
-  const { state } = useLedger();
+  const state = useLedgerState();
+  // Read the clock once per mount (Date.now() during render is impure). Declared
+  // before the early return below so hooks are always called in the same order.
+  const [now] = useState(() => Date.now());
   const g = state.goals.find((x) => x.id === goalId);
   if (!g) {
     return (
@@ -248,7 +284,7 @@ export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: str
     ),
   );
   const deadline = new Date(g.deadline);
-  const daysLeft = Math.round((deadline.getTime() - Date.now()) / 86_400_000);
+  const daysLeft = Math.round((deadline.getTime() - now) / 86_400_000);
 
   return (
     <PageContainer>
@@ -256,13 +292,18 @@ export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: str
       <Hero
         eyebrow={g.priority ? `${g.priority.toUpperCase()} priority goal` : "Goal"}
         title={g.name}
+        actions={<GoalActions goal={g} basePath={basePath} />}
         value={formatMoney(current, g.currency, { compact: true })}
         valueHint={`${Math.round(progress.pct * 100)}% of ${formatMoney(g.target, g.currency, { compact: true })} target`}
         meta={
           <>
             <HeroMeta
               label="Deadline"
-              value={deadline.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+              value={deadline.toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
               tone={daysLeft < 0 ? "neg" : "default"}
             />
             <HeroMeta
@@ -275,7 +316,11 @@ export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: str
                 label="Linked allocation"
                 value={
                   <Link
-                    to={basePath === "/personal" ? `/personal/allocations/${linkedAlloc.id}` : `/businesses/${g.domainId}/allocations/${linkedAlloc.id}`}
+                    to={
+                      basePath === "/personal"
+                        ? `/personal/allocations/${linkedAlloc.id}`
+                        : `/businesses/${g.domainId}/allocations/${linkedAlloc.id}`
+                    }
                     className="hover:underline inline-flex items-center gap-1"
                   >
                     {linkedAlloc.name}
@@ -296,14 +341,17 @@ export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: str
           />
         </div>
         <div className="text-xs text-muted-foreground mt-2 num">
-          {formatMoney(current, g.currency, { compact: true })} / {formatMoney(g.target, g.currency, { compact: true })}
+          {formatMoney(current, g.currency, { compact: true })} /{" "}
+          {formatMoney(g.target, g.currency, { compact: true })}
         </div>
       </div>
 
-
       <SectionTitle>Funding history</SectionTitle>
       {relatedTxns.length === 0 ? (
-        <EmptyState title="No funding yet" description="Flag any ledger entry with this goal to record progress." />
+        <EmptyState
+          title="No funding yet"
+          description="Flag any ledger entry with this goal to record progress."
+        />
       ) : (
         <div className="border border-border rounded-lg bg-card divide-y divide-border overflow-hidden">
           {relatedTxns
@@ -318,7 +366,8 @@ export function GoalDetail({ goalId, basePath }: { goalId: string; basePath: str
 }
 
 export function TransactionDetail({ transactionId }: { transactionId: string }) {
-  const { state, updateTransaction } = useLedger();
+  const state = useLedgerState();
+  const { updateTransaction } = useLedgerActions();
   const t = state.transactions.find((x) => x.id === transactionId);
   if (!t) {
     return (
@@ -352,11 +401,21 @@ export function TransactionDetail({ transactionId }: { transactionId: string }) 
     <PageContainer>
       <BackLink to={backTo} label="Back" />
       <Hero
-        eyebrow={new Date(t.date).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
+        eyebrow={new Date(t.date).toLocaleDateString("en-US", {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+        })}
         title={t.description}
+        actions={<TransactionActions transaction={t} backTo={backTo} />}
         value={total > 0 ? formatMoney(total, currency, { compact: true }) : "—"}
         valueTone={voided ? "muted" : "default"}
-        valueHint={voided ? "Voided — ignored by every balance" : `${t.entries.length} ${t.entries.length === 1 ? "entry" : "entries"} · ${t.kind.replace("_", " ")}`}
+        valueHint={
+          voided
+            ? "Voided — ignored by every balance"
+            : `${t.entries.length} ${t.entries.length === 1 ? "entry" : "entries"} · ${t.kind.replace("_", " ")}`
+        }
         meta={
           <>
             <HeroMeta
@@ -365,9 +424,13 @@ export function TransactionDetail({ transactionId }: { transactionId: string }) 
                 canEditStatus ? (
                   <Select
                     value={t.status ?? "cleared"}
-                    onValueChange={(v) => updateTransaction(t.id, { status: v as TransactionStatus })}
+                    onValueChange={(v) =>
+                      updateTransaction(t.id, { status: v as TransactionStatus })
+                    }
                   >
-                    <SelectTrigger className="h-7 w-32 capitalize text-xs"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-7 w-32 capitalize text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
                       {STATUS_OPTIONS.map((s) => (
                         <SelectItem key={s.value} value={s.value} className="capitalize">
@@ -381,7 +444,10 @@ export function TransactionDetail({ transactionId }: { transactionId: string }) 
                 )
               }
             />
-            <HeroMeta label="Kind" value={<span className="capitalize">{t.kind.replace("_", " ")}</span>} />
+            <HeroMeta
+              label="Kind"
+              value={<span className="capitalize">{t.kind.replace("_", " ")}</span>}
+            />
             <HeroMeta label="Entries" value={<span className="num">{t.entries.length}</span>} />
           </>
         }
@@ -394,13 +460,19 @@ export function TransactionDetail({ transactionId }: { transactionId: string }) 
         </div>
       )}
 
-
       <SectionTitle>Entries</SectionTitle>
-      <div className={["border border-border rounded-lg bg-card divide-y divide-border overflow-hidden mb-10", voided ? "opacity-60" : ""].join(" ")}>
+      <div
+        className={[
+          "border border-border rounded-lg bg-card divide-y divide-border overflow-hidden mb-10",
+          voided ? "opacity-60" : "",
+        ].join(" ")}
+      >
         {t.entries.map((e, i) => {
           const obj = state.objects.find((o) => o.id === e.objectId);
           const cat = e.categoryId ? state.categories.find((c) => c.id === e.categoryId) : null;
-          const alloc = e.allocationId ? state.allocations.find((a) => a.id === e.allocationId) : null;
+          const alloc = e.allocationId
+            ? state.allocations.find((a) => a.id === e.allocationId)
+            : null;
           const goal = e.goalId ? state.goals.find((g) => g.id === e.goalId) : null;
           return (
             <div key={i} className="grid grid-cols-12 gap-4 px-4 py-3 text-sm items-center">

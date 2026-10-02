@@ -1,7 +1,8 @@
-import { Link } from "react-router-dom";
+import { Link } from "@/components/app-link";
 import { PageContainer, Hero, HeroMeta, SectionTitle } from "@/components/page";
 import {
-  useLedger,
+  useLedgerState,
+  useLedgerActions,
   workspaceMetrics,
   domainMetrics,
   formatMoney,
@@ -15,14 +16,26 @@ import {
 } from "@/lib/ledger";
 import type { CurrencyCode, LedgerState } from "@/lib/ledger";
 import { ArrowUpRight, AlertTriangle, Calendar, Target } from "lucide-react";
+import { ui } from "@/lib/ui-store";
+import type { QuickKind } from "@/components/quick-create";
 
 export default function Home() {
-
-  const { state } = useLedger();
+  const state = useLedgerState();
   const ws = workspaceMetrics(state);
-  const businessDomains = state.domains.filter((d) => d.id !== "personal");
+  // "personal" is the id the app gives the built-in personal workspace; fall
+  // back to any personal-kind domain (e.g. an imported one).
+  const personalDomain =
+    state.domains.find((d) => d.id === "personal") ??
+    state.domains.find((d) => d.kind === "personal");
+  const businessDomains = state.domains.filter((d) => d.id !== personalDomain?.id);
 
-  const recent = state.transactions.slice(0, 8);
+  // Newest first by transaction DATE (state order is insertion order, so a
+  // back-dated entry used to show up as the "latest"), and skip any
+  // transaction with no entries instead of crashing on entries[0].
+  const recent = [...state.transactions]
+    .filter((t) => t.entries.length > 0)
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 8);
 
   // Reporting currency for the whole workspace — Settings → General →
   // "default currency" (see Settings.tsx). Every aggregate selector
@@ -31,7 +44,8 @@ export default function Home() {
   // currency, same as Reports.tsx and DomainWorkspace already do. This
   // used to be hardcoded to NGN regardless of that setting.
   const wdc = workspaceDisplayCurrency(state);
-  const disp = (usd: number) => formatMoney(convert(state, usd, "USD", wdc), wdc, { compact: true });
+  const disp = (usd: number) =>
+    formatMoney(convert(state, usd, "USD", wdc), wdc, { compact: true });
 
   return (
     <PageContainer>
@@ -52,13 +66,12 @@ export default function Home() {
         }
       />
 
-
       <div className="grid grid-cols-12 gap-10">
         {/* Domain summary */}
         <section className="col-span-12 lg:col-span-8">
           <SectionTitle>Domain Summary</SectionTitle>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <DomainCard domainId="personal" />
+            {personalDomain && <DomainCard domainId={personalDomain.id} />}
             {businessDomains.map((d) => (
               <DomainCard key={d.id} domainId={d.id} />
             ))}
@@ -81,18 +94,28 @@ export default function Home() {
                       voided ? "opacity-50" : "",
                     ].join(" ")}
                   >
-
                     <span className="num text-xs text-muted-foreground w-14">
-                      {new Date(t.date).toLocaleDateString("en-US", { month: "short", day: "2-digit" })}
+                      {new Date(t.date).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "2-digit",
+                      })}
                     </span>
-                    <span className={["flex-1 truncate", voided ? "line-through" : ""].join(" ")}>{t.description}</span>
+                    <span className={["flex-1 truncate", voided ? "line-through" : ""].join(" ")}>
+                      {t.description}
+                    </span>
                     <span className="text-[10px] uppercase tracking-widest text-muted-foreground w-24 truncate">
                       {domain?.name}
                     </span>
                     <span
                       className={[
                         "num text-sm w-28 text-right",
-                        voided ? "" : first.amount > 0 ? "text-pos" : first.amount < 0 ? "text-neg" : "",
+                        voided
+                          ? ""
+                          : first.amount > 0
+                            ? "text-pos"
+                            : first.amount < 0
+                              ? "text-neg"
+                              : "",
                       ].join(" ")}
                     >
                       {obj ? formatMoney(first.amount, obj.currency) : first.amount}
@@ -110,7 +133,14 @@ export default function Home() {
             <SectionTitle>Upcoming</SectionTitle>
             <ul className="space-y-3">
               {deriveUpcoming(state).map((u, i) => (
-                <UpcomingRow key={i} icon={u.icon} label={u.label} detail={u.detail} amount={u.amount} tone={u.tone} />
+                <UpcomingRow
+                  key={i}
+                  icon={u.icon}
+                  label={u.label}
+                  detail={u.detail}
+                  amount={u.amount}
+                  tone={u.tone}
+                />
               ))}
             </ul>
           </div>
@@ -118,9 +148,9 @@ export default function Home() {
           <div>
             <SectionTitle>Quick Actions</SectionTitle>
             <div className="grid grid-cols-1 gap-2">
-              <QuickAction to="/personal/transactions" label="New Transaction" />
-              <QuickAction to="/personal/accounts" label="New Transfer" />
-              <QuickAction to="/businesses" label="New Business" />
+              <QuickAction kind="transaction" label="New Transaction" />
+              <QuickAction kind="transfer" label="New Transfer" />
+              <QuickAction kind="business" label="New Business" />
             </div>
           </div>
         </aside>
@@ -130,7 +160,7 @@ export default function Home() {
 }
 
 function DomainCard({ domainId }: { domainId: string }) {
-  const { state } = useLedger();
+  const state = useLedgerState();
   const domain = state.domains.find((d) => d.id === domainId);
   if (!domain) return null;
   const m = domainMetrics(state, domainId);
@@ -140,7 +170,8 @@ function DomainCard({ domainId }: { domainId: string }) {
   // if it has one, else the workspace default (see domainDisplayCurrency
   // and domain-workspace.tsx, which already respects this correctly).
   const ddc = domainDisplayCurrency(state, domainId);
-  const disp = (usd: number) => formatMoney(convert(state, usd, "USD", ddc), ddc, { compact: true });
+  const disp = (usd: number) =>
+    formatMoney(convert(state, usd, "USD", ddc), ddc, { compact: true });
   return (
     <Link
       to={to}
@@ -148,20 +179,22 @@ function DomainCard({ domainId }: { domainId: string }) {
     >
       <div className="flex items-start justify-between mb-4">
         <div>
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{domain.kind}</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            {domain.kind}
+          </div>
           <div className="font-medium">{domain.name}</div>
         </div>
         <ArrowUpRight className="size-4 text-muted-foreground group-hover:text-foreground transition-colors" />
       </div>
       <div className="grid grid-cols-3 gap-4">
         <MiniStat label="Net Worth" value={disp(m.netWorth)} />
-        <MiniStat label={domainId === "trading" ? "Portfolio" : domain.kind === "business" ? "Cash" : "Liquid"} value={disp(m.liquid)} />
         <MiniStat
-          label="Flow"
-          value={
-            <Sparkline data={cash.map((c) => c.net)} />
+          label={
+            domainId === "trading" ? "Portfolio" : domain.kind === "business" ? "Cash" : "Liquid"
           }
+          value={disp(m.liquid)}
         />
+        <MiniStat label="Flow" value={<Sparkline data={cash.map((c) => c.net)} />} />
       </div>
     </Link>
   );
@@ -181,7 +214,8 @@ function Sparkline({ data }: { data: number[] }) {
   const min = Math.min(...data);
   const max = Math.max(...data);
   const range = max - min || 1;
-  const w = 60, h = 20;
+  const w = 60,
+    h = 20;
   const pts = data
     .map((v, i) => {
       const x = (i / (data.length - 1)) * w;
@@ -223,15 +257,18 @@ function UpcomingRow({
   );
 }
 
-function QuickAction({ to, label }: { to: string; label: string }) {
+/** Opens the real dialog. These used to be links to list pages, so
+ *  "New Transfer" just landed on the Accounts tab. */
+function QuickAction({ kind, label }: { kind: QuickKind; label: string }) {
   return (
-    <Link
-      to={to}
-      className="text-sm border border-border rounded-md px-3 py-2 hover:bg-accent transition-colors flex items-center justify-between"
+    <button
+      type="button"
+      onClick={() => ui.openQuickCreate(kind)}
+      className="text-sm border border-border rounded-md px-3 py-2 hover:bg-accent transition-colors flex items-center justify-between text-left"
     >
       {label}
       <ArrowUpRight className="size-3.5 text-muted-foreground" />
-    </Link>
+    </button>
   );
 }
 
@@ -253,10 +290,10 @@ function deriveUpcoming(state: LedgerState): UpcomingItem[] {
     if (o.dueDay == null) continue;
     const next = nextOccurrence(today, o.dueDay);
     const days = daysUntil(today, next);
-    const bal = balanceOf(state, o.id);
+    const owed = -balanceOf(state, o.id); // balances are signed; negative = owed
     if (o.kind === "loan" || o.kind === "mortgage") {
-      const min = o.minPayment ?? Math.min(bal, 0);
-      if (min > 0 && bal > 0) {
+      const min = o.minPayment ?? owed;
+      if (min > 0 && owed > 0) {
         items.push({
           icon: AlertTriangle,
           label: `${o.name} repayment`,
@@ -267,12 +304,12 @@ function deriveUpcoming(state: LedgerState): UpcomingItem[] {
         });
       }
     } else if (o.kind === "credit_card") {
-      if (bal > 0) {
+      if (owed > 0) {
         items.push({
           icon: AlertTriangle,
           label: `${o.name} statement`,
           detail: `Due ${fmtDate(next)}`,
-          amount: formatMoney(bal, o.currency),
+          amount: formatMoney(owed, o.currency),
           tone: "neg",
           sort: days,
         });
@@ -281,22 +318,36 @@ function deriveUpcoming(state: LedgerState): UpcomingItem[] {
   }
 
   // Recurring rent — infer next occurrence from the most recent rent expense
+  const rentCats = new Set(
+    state.categories.filter((c) => c.name.trim().toLowerCase() === "rent").map((c) => c.id),
+  );
   const rents = state.transactions
-    .filter((t) => t.entries.some((e) => e.categoryId === "cat_rent"))
+    .filter(
+      (t) =>
+        t.status !== "void" && t.entries.some((e) => e.categoryId && rentCats.has(e.categoryId)),
+    )
     .sort((a, b) => b.date.localeCompare(a.date));
   if (rents.length > 0) {
     const last = rents[0];
-    const lastEntry = last.entries.find((e) => e.categoryId === "cat_rent");
+    const lastEntry = last.entries.find((e) => e.categoryId && rentCats.has(e.categoryId));
     const obj = state.objects.find((o) => o.id === lastEntry?.objectId);
     if (obj && lastEntry) {
       const d = new Date(last.date);
-      const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()));
-      const days = daysUntil(today, next);
-      if (days >= 0) {
+      const next = new Date(
+        Date.UTC(
+          d.getUTCFullYear(),
+          d.getUTCMonth() + 1,
+          clampDay(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()),
+        ),
+      );
+      const days = daysUntil(startOfUtcDay(today), next);
+      // Overdue used to vanish (days < 0 was dropped): rent disappeared from
+      // the list exactly when it was late.
+      if (days >= -31) {
         items.push({
           icon: Calendar,
-          label: "Rent",
-          detail: `Due ${fmtDate(next)}`,
+          label: days < 0 ? "Rent (overdue)" : "Rent",
+          detail: days < 0 ? `Was due ${fmtDate(next)}` : `Due ${fmtDate(next)}`,
           amount: formatMoney(Math.abs(lastEntry.amount), obj.currency),
           tone: "neg",
           sort: days,
@@ -345,12 +396,25 @@ function deriveUpcoming(state: LedgerState): UpcomingItem[] {
   return items.sort((a, b) => a.sort - b.sort).slice(0, 4);
 }
 
+/** Last valid day of `month` (0-based): a due day of 31 in a 30-day month
+ *  used to roll over into the next month. */
+function clampDay(year: number, month: number, day: number): number {
+  return Math.min(day, new Date(Date.UTC(year, month + 1, 0)).getUTCDate());
+}
+
+function startOfUtcDay(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
 function nextOccurrence(from: Date, dueDay: number): Date {
+  const start = startOfUtcDay(from); // "due today" is upcoming, not already past
   const y = from.getUTCFullYear();
   const m = from.getUTCMonth();
-  const thisMonth = new Date(Date.UTC(y, m, dueDay));
-  if (thisMonth.getTime() >= from.getTime()) return thisMonth;
-  return new Date(Date.UTC(y, m + 1, dueDay));
+  const thisMonth = new Date(Date.UTC(y, m, clampDay(y, m, dueDay)));
+  if (thisMonth.getTime() >= start.getTime()) return thisMonth;
+  const ny = m === 11 ? y + 1 : y;
+  const nm = (m + 1) % 12;
+  return new Date(Date.UTC(ny, nm, clampDay(ny, nm, dueDay)));
 }
 
 function daysUntil(from: Date, to: Date): number {

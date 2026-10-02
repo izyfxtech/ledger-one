@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
+import { useSelector } from "@tanstack/react-store";
+import { Link } from "@/components/app-link";
 import {
   Home,
   Briefcase,
@@ -19,15 +21,10 @@ import {
   LineChart,
   ChevronLeft,
 } from "lucide-react";
-import { useSidebarShell } from "./sidebar-shell";
-import { loadDisplayName } from "@/lib/local-store";
-import { useLedger } from "@/lib/ledger";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { displayNameQuery } from "@/lib/app-queries";
+import { useLedgerState } from "@/lib/ledger";
+import { ui, uiStore } from "@/lib/ui-store";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type Item = { to: string; label: string; icon: React.ComponentType<{ className?: string }> };
 
@@ -41,7 +38,11 @@ const workspaceSecondary: Item[] = [
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
-const DOMAIN_TABS: Array<{ slug: string; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+const DOMAIN_TABS: Array<{
+  slug: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
   { slug: "", label: "Overview", icon: CircleDot },
   { slug: "accounts", label: "Accounts", icon: Wallet },
   { slug: "liabilities", label: "Liabilities", icon: CreditCard },
@@ -69,19 +70,18 @@ function activeDomainBase(pathname: string): { base: string; id: string } | null
   return null;
 }
 
-export function AppSidebar() {
-  const { collapsed, toggleCollapsed, mobileOpen, setMobileOpen } = useSidebarShell();
-  const [name, setName] = useState<string>(() => loadDisplayName());
-  const { pathname } = useLocation();
-  const { state } = useLedger();
-  const active = useMemo(() => activeDomainBase(pathname), [pathname]);
-  const domain = active ? state.domains.find((d) => d.id === active.id) : null;
+const usePathname = () => useRouterState({ select: (r) => r.location.pathname });
 
-  useEffect(() => {
-    const on = () => setName(loadDisplayName());
-    window.addEventListener("ledgerone:display-name-changed", on);
-    return () => window.removeEventListener("ledgerone:display-name-changed", on);
-  }, []);
+export function AppSidebar() {
+  const collapsed = useSelector(uiStore, (u) => u.sidebarCollapsed);
+  const mobileOpen = useSelector(uiStore, (u) => u.mobileNavOpen);
+  const toggleCollapsed = ui.toggleSidebar;
+  const setMobileOpen = ui.setMobileNav;
+  const { data: name = "" } = useQuery(displayNameQuery);
+  const pathname = usePathname();
+  const state = useLedgerState();
+  const active = activeDomainBase(pathname);
+  const domain = active ? state.domains.find((d) => d.id === active.id) : null;
 
   return (
     <>
@@ -106,7 +106,11 @@ export function AppSidebar() {
         ].join(" ")}
       >
         <div className="h-14 flex items-center gap-2 px-3 border-b border-border">
-          <Link to="/" className="size-6 rounded-sm bg-ink flex items-center justify-center shrink-0" aria-label="LedgerOne home">
+          <Link
+            to="/"
+            className="size-6 rounded-sm bg-ink flex items-center justify-center shrink-0"
+            aria-label="LedgerOne home"
+          >
             <BookOpen className="size-3.5 text-paper" strokeWidth={2.5} />
           </Link>
           <span
@@ -146,7 +150,10 @@ export function AppSidebar() {
           </nav>
         </TooltipProvider>
 
-        <div className="px-3 py-3 border-t border-border flex items-center gap-2" data-tour="user-badge">
+        <div
+          className="px-3 py-3 border-t border-border flex items-center gap-2"
+          data-tour="user-badge"
+        >
           <div className="size-7 rounded-full bg-primary/15 text-primary grid place-items-center text-xs font-semibold shrink-0">
             {(name.trim()[0] ?? "A").toUpperCase()}
           </div>
@@ -165,7 +172,11 @@ export function AppSidebar() {
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             className="hidden md:grid ml-auto size-7 place-items-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors"
           >
-            {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+            {collapsed ? (
+              <PanelLeftOpen className="size-4" />
+            ) : (
+              <PanelLeftClose className="size-4" />
+            )}
           </button>
         </div>
       </aside>
@@ -190,7 +201,7 @@ function DomainNav({
   domainKind: string;
   collapsed: boolean;
 }) {
-  const { pathname } = useLocation();
+  const pathname = usePathname();
   const isPersonal = base === "/personal";
   const backTo = isPersonal ? "/" : "/businesses";
   const backLabel = isPersonal ? "Workspace" : "All businesses";
@@ -219,7 +230,9 @@ function DomainNav({
           collapsed ? "md:opacity-0 md:h-0 md:pt-0 md:pb-0" : "opacity-100",
         ].join(" ")}
       >
-        <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{domainKind}</div>
+        <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+          {domainKind}
+        </div>
         <div className="display text-base leading-tight truncate">{domainName}</div>
       </div>
 
@@ -227,9 +240,7 @@ function DomainNav({
         {DOMAIN_TABS.map((t) => {
           const to = base + (t.slug ? `/${t.slug}` : "");
           const active =
-            t.slug === ""
-              ? pathname === base
-              : pathname === to || pathname.startsWith(to + "/");
+            t.slug === "" ? pathname === base : pathname === to || pathname.startsWith(to + "/");
           const Icon = t.icon;
           const link = (
             <Link
@@ -266,7 +277,9 @@ function DomainNav({
               {collapsed ? (
                 <Tooltip>
                   <TooltipTrigger asChild>{link}</TooltipTrigger>
-                  <TooltipContent side="right" sideOffset={8}>{t.label}</TooltipContent>
+                  <TooltipContent side="right" sideOffset={8}>
+                    {t.label}
+                  </TooltipContent>
                 </Tooltip>
               ) : (
                 link
@@ -279,9 +292,17 @@ function DomainNav({
   );
 }
 
-function NavGroup({ items, collapsed, personal }: { items: Item[]; collapsed: boolean; personal?: boolean }) {
-  const { pathname } = useLocation();
-  const { state } = useLedger();
+function NavGroup({
+  items,
+  collapsed,
+  personal,
+}: {
+  items: Item[];
+  collapsed: boolean;
+  personal?: boolean;
+}) {
+  const pathname = usePathname();
+  const state = useLedgerState();
   const personalDomain = personal ? state.domains.find((d) => d.id === "personal") : null;
   return (
     <ul className="flex flex-col gap-0.5">
@@ -323,7 +344,9 @@ function NavGroup({ items, collapsed, personal }: { items: Item[]; collapsed: bo
             {collapsed ? (
               <Tooltip>
                 <TooltipTrigger asChild>{link}</TooltipTrigger>
-                <TooltipContent side="right" sideOffset={8}>{it.label}</TooltipContent>
+                <TooltipContent side="right" sideOffset={8}>
+                  {it.label}
+                </TooltipContent>
               </Tooltip>
             ) : (
               link

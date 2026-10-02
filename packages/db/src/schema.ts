@@ -1,6 +1,8 @@
-// Drizzle schema for LedgerOne. This file is the single source of truth for
-// the database structure; `pnpm --filter @ledgerone/db generate` emits the
-// SQL under ./drizzle/*.sql, which is then consumed byte-identically by:
+// Drizzle schema for LedgerOne. This file DESCRIBES the database structure for
+// typed queries, but the SQL under ./drizzle/*.sql is HAND-WRITTEN (there is
+// no drizzle `meta/` journal, so `drizzle-kit generate` is not the source of
+// those files). When the shape changes, add a new numbered migration by hand
+// AND update this file to match. The SQL is consumed byte-identically by:
 //
 //   * the shipped desktop app (Rust `rusqlite`, embedded via include_str!)
 //   * the Node-side test double (better-sqlite3 through mockTauriSql)
@@ -28,6 +30,7 @@
 //     without schema churn. `settings.workspace_initialized` is the
 //     first-run seed gate.
 import {
+  real,
   sqliteTable,
   text,
   integer,
@@ -170,7 +173,7 @@ export const fxRates = sqliteTable(
   {
     base: text("base").notNull(),
     quote: text("quote").notNull(),
-    rate: integer("rate").notNull(), // rate ×1e6 (see money.ts)
+    rate: real("rate").notNull(), // plain REAL since migration 0002 (was ×1e6 integer)
   },
   (t) => ({
     pk: primaryKey({ columns: [t.base, t.quote] }),

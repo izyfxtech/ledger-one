@@ -9,15 +9,18 @@
 //
 // Use `toMoneyMinor` / `fromMoneyMinor` at every INSERT / UPDATE / SELECT
 // of a money column, and `toRateMinor` / `fromRateMinor` at every read /
-// write of a rate column (interest_rate, fx_rates.rate).
+// write of interest_rate. Amounts round half AWAY from zero (same as Rust's
+// f64::round); Math.round alone rounds -12.5 to -12 instead of -13.
 
 /** Money is stored ×100 (2 decimal places). Enough for the currencies
  *  LedgerOne targets; if a zero-decimal currency (JPY) or three-decimal
  *  (KWD) is added later, promote to a per-currency scale table. */
 export const MONEY_SCALE = 100;
 
-/** Rates are stored ×1_000_000 (6 decimal places). Covers FX and
- *  interest rates to well past display precision without float drift. */
+/** Interest rates (percent) are stored ×1_000_000 (6 decimal places).
+ *  FX rates are NOT scaled any more: a strong-to-weak pair such as NGN→USD
+ *  (~0.00065) kept only ~3 significant digits at this scale, so
+ *  fx_rates.rate is a plain REAL since migration 0002. */
 export const RATE_SCALE = 1_000_000;
 
 export function toMoneyMinor(major: number): number;
@@ -27,7 +30,8 @@ export function toMoneyMinor(major: number | null | undefined): number | null {
   if (!Number.isFinite(major)) {
     throw new RangeError(`toMoneyMinor: non-finite value ${major}`);
   }
-  return Math.round(major * MONEY_SCALE);
+  const scaled = Math.abs(major) * MONEY_SCALE;
+  return major < 0 ? -Math.round(scaled) : Math.round(scaled);
 }
 
 export function fromMoneyMinor(minor: number): number;

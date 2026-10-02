@@ -7,7 +7,7 @@
 -- drizzle-kit to understand them.
 --
 -- Applied AFTER all `*.sql` files in ./drizzle/ by both the Rust migration
--- list (see src-tauri/src/main.rs) and the Node runner (migrate.ts).
+-- list (see `MIGRATIONS` in src-tauri/src/db.rs) and the Node runner (migrate.ts).
 
 -- NOTE: The "every transaction has ≥1 entries" invariant is enforced
 -- app-side by `insertTransactionWithEntries` (see apps/desktop/src/lib/db/
@@ -19,7 +19,8 @@
 -- `SELECT 1;` — that gave false confidence without enforcing anything,
 -- so it has been removed.
 
--- Convenience view: transaction totals per object, in the object's native
+-- Convenience view (void transactions excluded, matching the app's selectors):
+-- transaction totals per object, in the object's native
 -- currency, expressed in integer minor units (same scale as entries.amount).
 -- Consumers convert to major units via fromMoneyMinor() at the boundary.
 CREATE VIEW IF NOT EXISTS v_object_balances AS
@@ -27,4 +28,6 @@ SELECT
   e.object_id       AS object_id,
   SUM(e.amount)     AS balance_minor
 FROM entries e
+JOIN transactions t ON t.id = e.transaction_id
+WHERE COALESCE(t.status, 'cleared') <> 'void'
 GROUP BY e.object_id;

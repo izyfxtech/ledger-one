@@ -1,13 +1,17 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "@/components/app-link";
 import { PageContainer, Hero, SectionTitle, EmptyState } from "@/components/page";
-import { useLedger, domainMetrics, formatMoney, convert, domainDisplayCurrency } from "@/lib/ledger";
+import {
+  useLedgerState,
+  domainMetrics,
+  formatMoney,
+  convert,
+  domainDisplayCurrency,
+} from "@/lib/ledger";
 import { Plus, ArrowUpRight } from "lucide-react";
-import { QuickCreateDialog, type QuickKind } from "@/components/quick-create";
+import { ui } from "@/lib/ui-store";
 
 export default function BusinessesIndex() {
-  const { state } = useLedger();
-  const [quickKind, setQuickKind] = useState<QuickKind | null>(null);
+  const state = useLedgerState();
   const businesses = state.domains.filter((d) => d.kind === "business" || d.kind === "trading");
 
   return (
@@ -19,7 +23,7 @@ export default function BusinessesIndex() {
         actions={
           <button
             type="button"
-            onClick={() => setQuickKind("business")}
+            onClick={() => ui.openQuickCreate("business")}
             className="text-sm border border-border rounded-md px-3 py-1.5 hover:bg-accent inline-flex items-center gap-1.5"
           >
             <Plus className="size-3.5" /> New Business
@@ -34,7 +38,7 @@ export default function BusinessesIndex() {
           action={
             <button
               type="button"
-              onClick={() => setQuickKind("business")}
+              onClick={() => ui.openQuickCreate("business")}
               className="text-sm border border-border rounded-md px-3 py-1.5 hover:bg-accent inline-flex items-center gap-1.5"
             >
               <Plus className="size-3.5" /> New Business
@@ -46,23 +50,34 @@ export default function BusinessesIndex() {
           {businesses.map((d) => {
             const m = domainMetrics(state, d.id);
             const ddc = domainDisplayCurrency(state, d.id);
-            const disp = (u: number) => formatMoney(convert(state, u, "USD", ddc), ddc, { compact: true });
+            const disp = (u: number) =>
+              formatMoney(convert(state, u, "USD", ddc), ddc, { compact: true });
             return (
-              <Link key={d.id} to={`/businesses/${d.id}`} className="group border border-border rounded-lg bg-card p-4 hover:border-foreground/20 transition-colors">
+              <Link
+                key={d.id}
+                to={`/businesses/${d.id}`}
+                className="group border border-border rounded-lg bg-card p-4 hover:border-foreground/20 transition-colors"
+              >
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{d.kind}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                      {d.kind}
+                    </div>
                     <div className="font-medium">{d.name}</div>
                   </div>
                   <ArrowUpRight className="size-4 text-muted-foreground group-hover:text-foreground" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Net Worth</div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                      Net Worth
+                    </div>
                     <div className="num text-sm font-medium">{disp(m.netWorth)}</div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Cash</div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                      Cash
+                    </div>
                     <div className="num text-sm font-medium">{disp(m.liquid)}</div>
                   </div>
                 </div>
@@ -71,7 +86,6 @@ export default function BusinessesIndex() {
           })}
         </div>
       )}
-      <QuickCreateDialog kind={quickKind} onClose={() => setQuickKind(null)} />
     </PageContainer>
   );
 }

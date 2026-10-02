@@ -6,9 +6,7 @@ const STATE: LedgerState = {
   currencies: ["USD"],
   fx: [],
   domains: [{ id: "dom_p", name: "Personal", kind: "personal" }],
-  objects: [
-    { id: "obj_wallet", domainId: "dom_p", name: "Wallet", kind: "cash", currency: "USD" },
-  ],
+  objects: [{ id: "obj_wallet", domainId: "dom_p", name: "Wallet", kind: "cash", currency: "USD" }],
   categories: [{ id: "cat_food", name: "Food, Drink", type: "expense" }],
   allocations: [],
   goals: [],
@@ -30,7 +28,9 @@ describe("csv export", () => {
     const csv = transactionsToCsv(STATE);
     expect(csv.charCodeAt(0)).toBe(0xfeff);
     const lines = csv.slice(1).trim().split("\r\n");
-    expect(lines[0]).toBe("Date,Description,Kind,Status,Domain,Account,Category,Amount,Currency,Notes");
+    expect(lines[0]).toBe(
+      "Date,Description,Kind,Status,Domain,Account,Category,Amount,Currency,Notes",
+    );
     expect(lines[1]).toContain("Personal");
     expect(lines[1]).toContain("Wallet");
     expect(lines[1]).toContain("-12.5");

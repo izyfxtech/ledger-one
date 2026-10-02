@@ -1,7 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
-import { Search, Plus, Menu, Sun, Moon, Monitor, Check, ChevronDown, Briefcase, User } from "lucide-react";
-import { useSidebarShell } from "./sidebar-shell";
+import { useRouterState } from "@tanstack/react-router";
+import { Link } from "@/components/app-link";
+import { useQuery } from "@tanstack/react-query";
+import { useHotkey } from "@tanstack/react-hotkeys";
+import { useSelector } from "@tanstack/react-store";
+import {
+  Search,
+  Plus,
+  Menu,
+  Sun,
+  Moon,
+  Monitor,
+  Check,
+  ChevronDown,
+  Briefcase,
+  User,
+} from "lucide-react";
 import { canPerform } from "@/lib/local-store";
 import {
   DropdownMenu,
@@ -12,9 +25,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { CommandPalette } from "./command-palette";
-import { QuickCreateDialog, type QuickKind } from "./quick-create";
-import { useLedger } from "@/lib/ledger";
-import { DEFAULT_SETTINGS } from "@/lib/ledger/store";
+import type { QuickKind } from "./quick-create";
+import { DEFAULT_SETTINGS, useLedgerActions, useLedgerState } from "@/lib/ledger";
+import { usersQuery } from "@/lib/app-queries";
+import { ui, uiStore } from "@/lib/ui-store";
+import { SyncStatus } from "./sync-status";
 
 /** Extract active domain id from pathname; null when on Home/Reports/Settings. */
 function activeDomainId(pathname: string): string | null {
@@ -24,29 +39,20 @@ function activeDomainId(pathname: string): string | null {
 }
 
 export function AppTopbar() {
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [quickKind, setQuickKind] = useState<QuickKind | null>(null);
-  const { setMobileOpen } = useSidebarShell();
-  const [canWrite, setCanWrite] = useState(() => canPerform("write"));
-  const { pathname } = useLocation();
-  const { state } = useLedger();
-  const activeId = useMemo(() => activeDomainId(pathname), [pathname]);
+  const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const state = useLedgerState();
+  useQuery(usersQuery); // re-render when the active user/role changes
+  const canWrite = canPerform("write");
+  const activeId = activeDomainId(pathname);
   const activeDomain = activeId ? state.domains.find((d) => d.id === activeId) : null;
 
-  useEffect(() => {
-    const sync = () => setCanWrite(canPerform("write"));
-    window.addEventListener("ledgerone:users-changed", sync);
-    return () => window.removeEventListener("ledgerone:users-changed", sync);
-  }, []);
-
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const kind = (e as CustomEvent<QuickKind>).detail;
-      if (kind) setQuickKind(kind);
-    };
-    window.addEventListener("ledgerone:quick-create", handler as EventListener);
-    return () => window.removeEventListener("ledgerone:quick-create", handler as EventListener);
-  }, []);
+  useHotkey("Mod+K", () => ui.togglePalette());
+  // "T" = new transaction (the menu advertises it). Single-key hotkeys ignore
+  // text inputs by default; also hold off while a dialog or the palette is open.
+  const overlayOpen = useSelector(uiStore, (st) => st.quickKind !== null || st.paletteOpen);
+  useHotkey("T", () => ui.openQuickCreate("transaction", activeId), {
+    enabled: canWrite && !overlayOpen,
+  });
 
   const options: { kind: QuickKind; label: string; hint?: string }[] = [
     { kind: "transaction", label: "Transaction", hint: "T" },
@@ -65,7 +71,7 @@ export function AppTopbar() {
     <header className="h-14 sticky top-0 z-30 bg-background/85 backdrop-blur border-b border-border flex items-center gap-3 px-3 sm:px-4">
       <button
         type="button"
-        onClick={() => setMobileOpen(true)}
+        onClick={() => ui.setMobileNav(true)}
         aria-label="Open sidebar"
         className="md:hidden size-8 grid place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
       >
@@ -87,7 +93,9 @@ export function AppTopbar() {
                 <Briefcase className="size-3.5 text-muted-foreground" />
               )
             ) : (
-              <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Workspace</span>
+              <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                Workspace
+              </span>
             )}
             <span className="font-medium max-w-[10rem] truncate">
               {activeDomain ? activeDomain.name : "All ledgers"}
@@ -135,21 +143,27 @@ export function AppTopbar() {
       </DropdownMenu>
 
       <button
-        onClick={() => setPaletteOpen(true)}
+        onClick={() => ui.setPalette(true)}
         data-tour="search"
         className="group flex-1 max-w-md flex items-center gap-2 h-8 rounded-md border border-border bg-card px-3 text-left text-sm text-muted-foreground hover:border-foreground/20 transition-colors"
       >
         <Search className="size-3.5" />
         <span>Search everything…</span>
-        <kbd className="ml-auto text-[10px] font-mono border border-border rounded px-1.5 py-0.5 group-hover:border-foreground/20">⌘K</kbd>
+        <kbd className="ml-auto text-[10px] font-mono border border-border rounded px-1.5 py-0.5 group-hover:border-foreground/20">
+          ⌘K
+        </kbd>
       </button>
 
       <div className="ml-auto flex items-center gap-2">
+        <SyncStatus />
         <ThemeToggle />
         {canWrite && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button data-tour="new" className="h-8 px-3 rounded-md bg-ink text-paper text-sm font-medium inline-flex items-center gap-1.5 hover:opacity-90 transition-opacity">
+              <button
+                data-tour="new"
+                className="h-8 px-3 rounded-md bg-ink text-paper text-sm font-medium inline-flex items-center gap-1.5 hover:opacity-90 transition-opacity"
+              >
                 <Plus className="size-4" strokeWidth={2.4} />
                 New
               </button>
@@ -160,7 +174,10 @@ export function AppTopbar() {
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               {options.map((o) => (
-                <DropdownMenuItem key={o.kind} onSelect={() => setQuickKind(o.kind)}>
+                <DropdownMenuItem
+                  key={o.kind}
+                  onSelect={() => ui.openQuickCreate(o.kind, activeId)}
+                >
                   {o.label}
                   {o.hint && (
                     <kbd className="ml-auto text-[10px] font-mono border border-border rounded px-1 py-0.5">
@@ -174,18 +191,19 @@ export function AppTopbar() {
         )}
       </div>
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      <QuickCreateDialog kind={quickKind} onClose={() => setQuickKind(null)} />
+      <CommandPalette />
     </header>
   );
 }
 
 function ThemeToggle() {
-  const { state, updateSettings } = useLedger();
+  const state = useLedgerState();
+  const { updateSettings } = useLedgerActions();
   const theme = state.settings?.theme ?? DEFAULT_SETTINGS.theme;
   const Icon = theme === "dark" ? Moon : theme === "system" ? Monitor : Sun;
   const next = theme === "light" ? "dark" : theme === "dark" ? "system" : "light";
-  const label = theme === "light" ? "Light theme" : theme === "dark" ? "Dark theme" : "System theme";
+  const label =
+    theme === "light" ? "Light theme" : theme === "dark" ? "Dark theme" : "System theme";
   return (
     <button
       type="button"

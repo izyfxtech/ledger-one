@@ -74,7 +74,16 @@ const transaction = z.object({
   id: z.string(),
   date: z.string(),
   description: z.string(),
-  kind: z.enum(["income", "expense", "transfer", "loan_disbursement", "loan_repayment", "interest", "fx"]),
+  kind: z.enum([
+    "income",
+    "expense",
+    "transfer",
+    "loan_disbursement",
+    "loan_repayment",
+    "interest",
+    "fx",
+    "opening",
+  ]),
   status: z.enum(["cleared", "pending", "reconciled", "void"]).optional(),
   notes: z.string().optional(),
   entries: z.array(entry).min(1),
@@ -90,13 +99,39 @@ const settings = z.object({
   workspaceName: z.string(),
   defaultCurrency: currency,
   fiscalYearStart: z.enum([
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
   ]),
   timezone: z.string(),
-  theme: z.enum(["light","dark","system"]),
-  density: z.enum(["comfortable","compact"]),
+  theme: z.enum(["light", "dark", "system"]),
+  density: z.enum(["comfortable", "compact"]),
 });
+
+/** One schema per syncable entity kind. Rows pulled from the cloud are
+ *  validated with these before they touch the local database, so a malformed
+ *  or hostile row can be skipped instead of corrupting the ledger. */
+export const entitySchemas = {
+  domain,
+  object: financialObject,
+  category,
+  allocation,
+  goal,
+  budget,
+  transaction,
+  fx: fxRate,
+  settings,
+  currencies: z.array(currency),
+} as const;
 
 export const ledgerStateSchema = z.object({
   currencies: z.array(currency),

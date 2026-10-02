@@ -44,7 +44,9 @@ function warnMissingRate(from: CurrencyCode, to: CurrencyCode) {
   if (warnedPairs.has(key)) return;
   warnedPairs.add(key);
   if (typeof console !== "undefined") {
-    console.warn(`[ledger] Missing FX rate for ${key}; treating amount as ${to}. Add an FX row to state.fx.`);
+    console.warn(
+      `[ledger] Missing FX rate for ${key}; treating amount as ${to}. Add an FX row to state.fx.`,
+    );
   }
 }
 
@@ -84,11 +86,17 @@ export function objectsByDomain(state: LedgerState, domainId: string) {
 
 export function domainMetrics(state: LedgerState, domainId: string) {
   const objs = objectsByDomain(state, domainId);
-  let assets = 0, liabilities = 0, liquid = 0;
+  let assets = 0,
+    liabilities = 0,
+    liquid = 0;
   for (const o of objs) {
     const b = balanceOf(state, o.id);
     const usd = convert(state, b, o.currency, "USD");
-    if (isLiability(o)) liabilities += usd;
+    // Ledger convention: entries are signed, so a liability's balance is
+    // negative while money is owed. `liabilities` reports the amount owed
+    // as a positive number (-balance); an overpaid card (positive balance)
+    // correctly reduces it.
+    if (isLiability(o)) liabilities -= usd;
     else {
       assets += usd;
       if (isLiquid(o)) liquid += usd;
@@ -98,28 +106,29 @@ export function domainMetrics(state: LedgerState, domainId: string) {
 }
 
 export function workspaceMetrics(state: LedgerState) {
-  let assets = 0, liabilities = 0, liquid = 0;
+  let assets = 0,
+    liabilities = 0,
+    liquid = 0;
   for (const o of state.objects) {
     const b = balanceOf(state, o.id);
     const usd = convert(state, b, o.currency, "USD");
-    if (isLiability(o)) liabilities += usd;
+    // Ledger convention: entries are signed, so a liability's balance is
+    // negative while money is owed. `liabilities` reports the amount owed
+    // as a positive number (-balance); an overpaid card (positive balance)
+    // correctly reduces it.
+    if (isLiability(o)) liabilities -= usd;
     else {
       assets += usd;
       if (isLiquid(o)) liquid += usd;
     }
   }
-  const businesses = state.domains.filter((d) => d.kind === "business" || d.kind === "trading").length;
-  const allocated = state.allocations.reduce((acc, a) => {
-    // sum entries flagged with this allocationId, converted to USD
-    let sum = 0;
-    for (const t of state.transactions)
-      for (const e of t.entries)
-        if (e.allocationId === a.id) {
-          const obj = state.objects.find((o) => o.id === e.objectId);
-          if (obj) sum += convert(state, e.amount, obj.currency, "USD");
-        }
-    return acc + Math.max(0, sum);
-  }, 0);
+  const businesses = state.domains.filter(
+    (d) => d.kind === "business" || d.kind === "trading",
+  ).length;
+  const allocated = state.allocations.reduce(
+    (acc, a) => acc + Math.max(0, allocationBalance(state, a.id)),
+    0,
+  );
   return {
     assets,
     liabilities,
@@ -166,36 +175,56 @@ export function goalProgress(state: LedgerState, goalId: string) {
   for (const t of state.transactions) {
     if (isVoid(t)) continue;
     for (const e of t.entries)
-      if (e.goalId === goalId || (g.linkedAllocationId && e.allocationId === g.linkedAllocationId)) {
+      if (
+        e.goalId === goalId ||
+        (g.linkedAllocationId && e.allocationId === g.linkedAllocationId)
+      ) {
         const obj = state.objects.find((o) => o.id === e.objectId);
-        if (obj) currentUsd += convert(state, Math.abs(e.amount), obj.currency, "USD");
+        if (obj) currentUsd += convert(state, e.amount, obj.currency, "USD"); // signed: a withdrawal lowers progress
       }
   }
+  currentUsd = Math.max(0, currentUsd);
   const targetUsd = convert(state, g.target, g.currency, "USD");
   return { current: currentUsd, pct: targetUsd > 0 ? Math.min(1, currentUsd / targetUsd) : 0 };
 }
 
-export function budgetSpent(
-  state: LedgerState,
-  budgetId: string,
-  categoryId: string,
-): number {
+/** `categoryId` plus every descendant (a budget line on "Food" covers
+ *  "Food > Dining out"). Guarded against parent cycles from imported data. */
+export function categoryAndDescendants(state: LedgerState, categoryId: string): Set<string> {
+  const out = new Set([categoryId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const c of state.categories)
+      if (c.parentId && out.has(c.parentId) && !out.has(c.id)) {
+        out.add(c.id);
+        grew = true;
+      }
+  }
+  return out;
+}
+
+/** Net spend in the budget's month, in the budget's currency: expenses minus
+ *  refunds (positive entries in the same category), never negative, and
+ *  including sub-categories. */
+export function budgetSpent(state: LedgerState, budgetId: string, categoryId: string): number {
   const b = state.budgets.find((x) => x.id === budgetId);
   if (!b) return 0;
   const [y, m] = b.month.split("-").map(Number);
-  let usd = 0;
+  const cats = categoryAndDescendants(state, categoryId);
+  let net = 0;
   for (const t of state.transactions) {
     if (isVoid(t)) continue;
     const d = new Date(t.date);
     if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m) continue;
     for (const e of t.entries) {
-      if (e.categoryId !== categoryId) continue;
+      if (!e.categoryId || !cats.has(e.categoryId)) continue;
       const obj = state.objects.find((o) => o.id === e.objectId);
       if (!obj || obj.domainId !== b.domainId) continue;
-      if (e.amount < 0) usd += convert(state, -e.amount, obj.currency, b.currency);
+      net += convert(state, -e.amount, obj.currency, b.currency);
     }
   }
-  return usd;
+  return Math.max(0, net);
 }
 
 /** Deliberately includes void transactions — this powers list views, and
@@ -216,11 +245,26 @@ export function transactionsForObject(state: LedgerState, objectId: string): Tra
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
+/** Kinds that move money around without earning or spending it: moving it
+ *  between your own accounts (transfer, fx), starting balances (opening) and
+ *  borrowed principal arriving (loan_disbursement). Counting these as income
+ *  and expense inflated both sides of every cash-flow report. */
+export const NON_FLOW_KINDS: ReadonlySet<Transaction["kind"]> = new Set([
+  "transfer",
+  "fx",
+  "opening",
+  "loan_disbursement",
+]);
+
 export function monthlyCashFlow(state: LedgerState, domainId: string) {
-  const ids = new Set(objectsByDomain(state, domainId).filter(isLiquid).map((o) => o.id));
+  const ids = new Set(
+    objectsByDomain(state, domainId)
+      .filter(isLiquid)
+      .map((o) => o.id),
+  );
   const buckets = new Map<string, { income: number; expense: number }>();
   for (const t of state.transactions) {
-    if (isVoid(t)) continue;
+    if (isVoid(t) || NON_FLOW_KINDS.has(t.kind)) continue;
     const d = new Date(t.date);
     const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
     const cur = buckets.get(key) ?? { income: 0, expense: 0 };
@@ -239,13 +283,21 @@ export function monthlyCashFlow(state: LedgerState, domainId: string) {
     .map(([month, v]) => ({ month, ...v, net: v.income - v.expense }));
 }
 
-export function formatMoney(amount: number, currency: CurrencyCode, opts: { signed?: boolean; compact?: boolean } = {}): string {
+export function formatMoney(
+  amount: number,
+  currency: CurrencyCode,
+  opts: { signed?: boolean; compact?: boolean } = {},
+): string {
   const sym: Record<CurrencyCode, string> = { NGN: "₦", USD: "$", GBP: "£", EUR: "€" };
   const abs = Math.abs(amount);
   const digits = currency === "NGN" ? 0 : 2;
-  const formatted = opts.compact && abs >= 1000
-    ? compactFormat(abs, digits)
-    : abs.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const formatted =
+    opts.compact && abs >= 1000
+      ? compactFormat(abs, digits)
+      : abs.toLocaleString("en-US", {
+          minimumFractionDigits: digits,
+          maximumFractionDigits: digits,
+        });
   const sign = amount < 0 ? "−" : opts.signed ? "+" : "";
   return `${sign}${sym[currency]}${formatted}`;
 }
@@ -255,4 +307,20 @@ function compactFormat(n: number, digits: number): string {
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return n.toFixed(digits);
+}
+
+/**
+ * Currencies that are in use but have no exchange rate to USD. The app never
+ * invents rates, so until the user enters one, anything in that currency can't
+ * be added into a USD-based total. Callers use this to say so instead of
+ * silently showing a wrong number.
+ */
+export function missingFxBases(state: LedgerState): CurrencyCode[] {
+  const used = new Set<CurrencyCode>();
+  for (const o of state.objects) used.add(o.currency);
+  for (const g of state.goals) used.add(g.currency);
+  for (const b of state.budgets) used.add(b.currency);
+  for (const a of state.allocations) if (a.targetCurrency) used.add(a.targetCurrency);
+  const have = new Set(state.fx.map((f) => f.base));
+  return [...used].filter((c) => c !== "USD" && !have.has(c)).sort();
 }

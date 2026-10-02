@@ -1,52 +1,39 @@
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "@tanstack/react-router";
+import { useSelector } from "@tanstack/react-store";
+import { useHotkey } from "@tanstack/react-hotkeys";
 import { Command } from "cmdk";
-import { useLedger, formatMoney, balanceOf } from "@/lib/ledger";
+import { useLedgerState, formatMoney, balanceOf } from "@/lib/ledger";
+import { domainBase } from "@/lib/paths";
+import { ui, uiStore } from "@/lib/ui-store";
 import { Search } from "lucide-react";
 
-export function CommandPalette({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-}) {
-  const { state } = useLedger();
-  const [q, setQ] = useState("");
+export function CommandPalette() {
+  const state = useLedgerState();
+  const open = useSelector(uiStore, (s) => s.paletteOpen);
+  const q = useSelector(uiStore, (s) => s.paletteQuery);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        onOpenChange(!open);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onOpenChange]);
-
-  const results = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    return {
-      accounts: state.objects.filter((o) => !query || o.name.toLowerCase().includes(query)),
-      allocations: state.allocations.filter((a) => !query || a.name.toLowerCase().includes(query)),
-      goals: state.goals.filter((g) => !query || g.name.toLowerCase().includes(query)),
-      categories: state.categories.filter((c) => !query || c.name.toLowerCase().includes(query)),
-      domains: state.domains.filter((d) => !query || d.name.toLowerCase().includes(query)),
-      transactions: state.transactions
-        .filter((t) => !query || t.description.toLowerCase().includes(query))
-        .slice(0, 8),
-    };
-  }, [q, state]);
+  // Esc was advertised by the badge below but never handled.
+  useHotkey("Escape", () => ui.setPalette(false), { enabled: open });
 
   if (!open) return null;
 
-  const go = (to: string) => {
-    onOpenChange(false);
-    setQ("");
-    navigate(to);
+  const query = q.trim().toLowerCase();
+  const match = (name: string) => !query || name.toLowerCase().includes(query);
+  const results = {
+    accounts: state.objects.filter((o) => match(o.name)),
+    allocations: state.allocations.filter((a) => match(a.name)),
+    goals: state.goals.filter((g) => match(g.name)),
+    domains: state.domains.filter((d) => match(d.name)),
+    transactions: state.transactions.filter((t) => match(t.description)).slice(0, 8),
   };
+
+  const go = (to: string) => {
+    ui.setPalette(false);
+    void navigate({ to: to as never });
+  };
+  const onOpenChange = ui.setPalette;
+  const setQ = ui.setPaletteQuery;
 
   return (
     <div
@@ -67,7 +54,9 @@ export function CommandPalette({
             placeholder="Search accounts, transactions, allocations, goals…"
             className="w-full h-12 bg-transparent outline-none text-sm placeholder:text-muted-foreground"
           />
-          <kbd className="text-[10px] text-muted-foreground border border-border rounded px-1.5 py-0.5">ESC</kbd>
+          <kbd className="text-[10px] text-muted-foreground border border-border rounded px-1.5 py-0.5">
+            ESC
+          </kbd>
         </div>
         <Command.List className="max-h-96 overflow-y-auto p-2">
           <Command.Empty className="py-8 text-center text-sm text-muted-foreground">
@@ -75,12 +64,15 @@ export function CommandPalette({
           </Command.Empty>
 
           {results.domains.length > 0 && (
-            <Command.Group heading="Domains" className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1">
+            <Command.Group
+              heading="Domains"
+              className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1"
+            >
               {results.domains.map((d) => (
                 <Command.Item
                   key={d.id}
                   value={`domain ${d.name}`}
-                  onSelect={() => go(d.id === "personal" ? "/personal" : `/businesses/${d.id}`)}
+                  onSelect={() => go(domainBase(d.id))}
                   className="flex items-center justify-between px-2 py-2 text-sm rounded-md cursor-pointer data-[selected=true]:bg-accent"
                 >
                   <span className="text-foreground">{d.name}</span>
@@ -91,27 +83,26 @@ export function CommandPalette({
           )}
 
           {results.accounts.length > 0 && (
-            <Command.Group heading="Accounts & Liabilities" className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1">
+            <Command.Group
+              heading="Accounts & Liabilities"
+              className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1"
+            >
               {results.accounts.slice(0, 8).map((o) => {
                 const bal = balanceOf(state, o.id);
                 return (
                   <Command.Item
                     key={o.id}
                     value={`account ${o.name} ${o.institution ?? ""}`}
-                    onSelect={() =>
-                      go(
-                        o.domainId === "personal"
-                          ? `/personal/accounts/${o.id}`
-                          : `/businesses/${o.domainId}/accounts/${o.id}`,
-                      )
-                    }
+                    onSelect={() => go(`${domainBase(o.domainId)}/accounts/${o.id}`)}
                     className="flex items-center justify-between px-2 py-2 text-sm rounded-md cursor-pointer data-[selected=true]:bg-accent"
                   >
                     <div>
                       <div className="text-foreground">{o.name}</div>
                       <div className="text-xs text-muted-foreground">{o.institution ?? o.kind}</div>
                     </div>
-                    <span className="num text-xs">{formatMoney(bal, o.currency, { compact: true })}</span>
+                    <span className="num text-xs">
+                      {formatMoney(bal, o.currency, { compact: true })}
+                    </span>
                   </Command.Item>
                 );
               })}
@@ -119,7 +110,10 @@ export function CommandPalette({
           )}
 
           {results.transactions.length > 0 && (
-            <Command.Group heading="Transactions" className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1">
+            <Command.Group
+              heading="Transactions"
+              className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1"
+            >
               {results.transactions.map((t) => (
                 <Command.Item
                   key={t.id}
@@ -129,7 +123,10 @@ export function CommandPalette({
                 >
                   <span>{t.description}</span>
                   <span className="text-xs text-muted-foreground num">
-                    {new Date(t.date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                    {new Date(t.date).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                    })}
                   </span>
                 </Command.Item>
               ))}
@@ -137,18 +134,15 @@ export function CommandPalette({
           )}
 
           {results.allocations.length > 0 && (
-            <Command.Group heading="Allocations" className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1">
+            <Command.Group
+              heading="Allocations"
+              className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1"
+            >
               {results.allocations.map((a) => (
                 <Command.Item
                   key={a.id}
                   value={`allocation ${a.name}`}
-                  onSelect={() =>
-                    go(
-                      a.domainId === "personal"
-                        ? `/personal/allocations/${a.id}`
-                        : `/businesses/${a.domainId}/allocations/${a.id}`,
-                    )
-                  }
+                  onSelect={() => go(`${domainBase(a.domainId)}/allocations/${a.id}`)}
                   className="px-2 py-2 text-sm rounded-md cursor-pointer data-[selected=true]:bg-accent"
                 >
                   {a.name}
@@ -158,18 +152,15 @@ export function CommandPalette({
           )}
 
           {results.goals.length > 0 && (
-            <Command.Group heading="Goals" className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1">
+            <Command.Group
+              heading="Goals"
+              className="text-[10px] uppercase tracking-widest text-muted-foreground px-2 pt-2 pb-1"
+            >
               {results.goals.map((g) => (
                 <Command.Item
                   key={g.id}
                   value={`goal ${g.name}`}
-                  onSelect={() =>
-                    go(
-                      g.domainId === "personal"
-                        ? `/personal/goals/${g.id}`
-                        : `/businesses/${g.domainId}/goals/${g.id}`,
-                    )
-                  }
+                  onSelect={() => go(`${domainBase(g.domainId)}/goals/${g.id}`)}
                   className="px-2 py-2 text-sm rounded-md cursor-pointer data-[selected=true]:bg-accent"
                 >
                   {g.name}
