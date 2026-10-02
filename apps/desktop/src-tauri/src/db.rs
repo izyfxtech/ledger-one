@@ -17,16 +17,31 @@
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction as SqlTransaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use serde::Deserializer;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 pub struct DbState(pub Mutex<Connection>);
 
+/// Distinguishes "key absent" (None: leave the column alone) from "key present
+/// and null" (Some(None): clear it) from "key present with a value"
+/// (Some(Some(v))). Plain `Option<T>` collapses the last two-of-three and made
+/// it impossible to clear an optional field through a patch.
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::deserialize(d)?))
+}
+
 // ---------------------------------------------------------------------------
 // Money / rate unit conversion — mirrors packages/db/src/money.ts exactly.
 // Amounts are stored as integer minor units (×100); rates as integer
-// micro-units (×1_000_000). Both round-half-away-from-zero via f64::round.
+// micro-units (×1_000_000) — used only for interest_rate; FX rates are plain
+// REALs since migration 0002. Both round-half-away-from-zero (f64::round), and
+// packages/db/src/money.ts now rounds the same way for negative halves.
 // ---------------------------------------------------------------------------
 
 fn to_money_minor(v: Option<f64>) -> Option<i64> {
@@ -107,20 +122,20 @@ pub struct ObjectPatch {
     pub domain_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub institution: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub institution: Option<Option<String>>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     pub currency: Option<String>,
-    #[serde(default)]
-    pub interest_rate: Option<f64>,
-    #[serde(default)]
-    pub min_payment: Option<f64>,
-    #[serde(default)]
-    pub credit_limit: Option<f64>,
-    #[serde(default)]
-    pub due_day: Option<i64>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub interest_rate: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub min_payment: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub credit_limit: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub due_day: Option<Option<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,8 +232,8 @@ pub struct TransactionPatch {
     pub kind: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
-    #[serde(default)]
-    pub notes: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub notes: Option<Option<String>>,
     #[serde(default)]
     pub entries: Option<Vec<Entry>>,
 }
@@ -274,6 +289,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "triggers",
         include_str!("../../../../packages/db/drizzle/triggers.sql"),
+    ),
+    (
+        "0002_integrity_and_fx_precision",
+        include_str!("../../../../packages/db/drizzle/0002_integrity_and_fx_precision.sql"),
     ),
 ];
 
@@ -540,11 +559,11 @@ pub fn select_ledger_state(conn: &Connection) -> rusqlite::Result<LedgerState> {
         let mut rows = stmt.query([])?;
         let mut out = vec![];
         while let Some(row) = rows.next()? {
-            let rate: i64 = row.get("rate")?;
+            let rate: f64 = row.get("rate")?;
             out.push(FxRate {
                 base: row.get("base")?,
                 quote: row.get("quote")?,
-                rate: from_rate_minor(Some(rate)).unwrap_or(0.0),
+                rate,
             });
         }
         out
@@ -634,46 +653,31 @@ pub fn delete_domain(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
 
     let object_ids: Vec<String> = {
         let mut stmt = tx.prepare("SELECT id FROM financial_objects WHERE domain_id = ?1")?;
-        let rows = stmt.query_map(params![id], |r| r.get(0))?
+        let rows = stmt
+            .query_map(params![id], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
+    detach_objects(&tx, &object_ids)?;
 
-    if !object_ids.is_empty() {
-        let placeholders = in_placeholders(object_ids.len());
-
-        let doomed_tx_ids: Vec<String> = {
-            let sql = format!(
-                "SELECT t.id FROM transactions t
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM entries e
-                   WHERE e.transaction_id = t.id
-                     AND e.object_id NOT IN ({placeholders})
-                 )"
-            );
-            let mut stmt = tx.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(object_ids.iter()), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        };
-
-        if !doomed_tx_ids.is_empty() {
-            let doomed_placeholders = in_placeholders(doomed_tx_ids.len());
-            tx.execute(
-                &format!("DELETE FROM entries WHERE transaction_id IN ({doomed_placeholders})"),
-                rusqlite::params_from_iter(doomed_tx_ids.iter()),
-            )?;
-            tx.execute(
-                &format!("DELETE FROM transactions WHERE id IN ({doomed_placeholders})"),
-                rusqlite::params_from_iter(doomed_tx_ids.iter()),
-            )?;
-        }
-
-        tx.execute(
-            &format!("DELETE FROM entries WHERE object_id IN ({placeholders})"),
-            rusqlite::params_from_iter(object_ids.iter()),
-        )?;
-    }
+    // Entries on surviving objects (e.g. another domain's account) may still
+    // carry this domain's allocation/goal tags; clear them rather than leave a
+    // tag that points at nothing.
+    tx.execute(
+        "UPDATE entries SET allocation_id = NULL
+          WHERE allocation_id IN (SELECT id FROM allocations WHERE domain_id = ?1)",
+        params![id],
+    )?;
+    tx.execute(
+        "UPDATE entries SET goal_id = NULL
+          WHERE goal_id IN (SELECT id FROM goals WHERE domain_id = ?1)",
+        params![id],
+    )?;
+    tx.execute(
+        "UPDATE goals SET linked_allocation_id = NULL
+          WHERE linked_allocation_id IN (SELECT id FROM allocations WHERE domain_id = ?1)",
+        params![id],
+    )?;
 
     tx.execute("DELETE FROM financial_objects WHERE domain_id = ?1", params![id])?;
     tx.execute("DELETE FROM allocations WHERE domain_id = ?1", params![id])?;
@@ -687,15 +691,6 @@ pub fn delete_domain(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
 
     tx.commit()
 }
-
-/// Builds `?1, ?2, ..., ?n` for a dynamic-length IN (...) clause.
-fn in_placeholders(n: usize) -> String {
-    (1..=n).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ")
-}
-
-// ---------------------------------------------------------------------------
-// Write: financial_objects
-// ---------------------------------------------------------------------------
 
 pub fn insert_object(conn: &Connection, o: &FinancialObject) -> rusqlite::Result<()> {
     conn.execute(
@@ -723,35 +718,21 @@ pub fn update_object(conn: &Connection, id: &str, patch: &ObjectPatch) -> rusqli
     let mut sets: Vec<String> = vec![];
     let mut owned: Vec<Box<dyn rusqlite::ToSql>> = vec![];
 
-    macro_rules! set_field {
-        ($col:literal, $val:expr) => {
-            if let Some(v) = $val {
-                owned.push(Box::new(v.clone()));
-                sets.push(format!("{} = ?{}", $col, owned.len()));
-            }
-        };
+    macro_rules! push {
+        ($col:literal, $val:expr) => {{
+            owned.push(Box::new($val));
+            sets.push(format!("{} = ?{}", $col, owned.len()));
+        }};
     }
-    set_field!("domain_id", &patch.domain_id);
-    set_field!("name", &patch.name);
-    set_field!("institution", &patch.institution);
-    set_field!("kind", &patch.kind);
-    set_field!("currency", &patch.currency);
-    if let Some(v) = patch.interest_rate {
-        owned.push(Box::new(to_rate_minor(Some(v))));
-        sets.push(format!("interest_rate = ?{}", owned.len()));
-    }
-    if let Some(v) = patch.min_payment {
-        owned.push(Box::new(to_money_minor(Some(v))));
-        sets.push(format!("min_payment = ?{}", owned.len()));
-    }
-    if let Some(v) = patch.credit_limit {
-        owned.push(Box::new(to_money_minor(Some(v))));
-        sets.push(format!("credit_limit = ?{}", owned.len()));
-    }
-    if let Some(v) = patch.due_day {
-        owned.push(Box::new(v));
-        sets.push(format!("due_day = ?{}", owned.len()));
-    }
+    if let Some(v) = &patch.domain_id { push!("domain_id", v.clone()); }
+    if let Some(v) = &patch.name { push!("name", v.clone()); }
+    if let Some(v) = &patch.institution { push!("institution", v.clone()); }
+    if let Some(v) = &patch.kind { push!("kind", v.clone()); }
+    if let Some(v) = &patch.currency { push!("currency", v.clone()); }
+    if let Some(v) = patch.interest_rate { push!("interest_rate", to_rate_minor(v)); }
+    if let Some(v) = patch.min_payment { push!("min_payment", to_money_minor(v)); }
+    if let Some(v) = patch.credit_limit { push!("credit_limit", to_money_minor(v)); }
+    if let Some(v) = patch.due_day { push!("due_day", v); }
 
     if sets.is_empty() {
         return Ok(());
@@ -767,19 +748,70 @@ pub fn update_object(conn: &Connection, id: &str, patch: &ObjectPatch) -> rusqli
     Ok(())
 }
 
+/// Remove `object_ids` from the ledger without corrupting what is left.
+///
+/// * A transaction whose entries ALL sit on the doomed objects is deleted.
+/// * A transaction that also has entries on surviving objects (a transfer to
+///   another account or domain) keeps those entries, but is marked `void` with
+///   a note. Dropping just one leg would leave a one-sided entry that still
+///   counted toward the surviving account's balance; void keeps the history
+///   and takes it out of every balance, exactly like a user-voided entry.
+/// * Transactions that never touched the doomed objects (including any that
+///   legitimately have no entries) are left alone. The previous
+///   `NOT EXISTS (... <> id)` form also matched those and deleted them.
+fn detach_objects(tx: &SqlTransaction, object_ids: &[String]) -> rusqlite::Result<()> {
+    if object_ids.is_empty() {
+        return Ok(());
+    }
+    let ids = serde_json::to_string(object_ids).unwrap();
+
+    let wholly_owned: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT transaction_id FROM entries
+               WHERE object_id IN (SELECT value FROM json_each(?1))
+             EXCEPT
+             SELECT DISTINCT transaction_id FROM entries
+               WHERE object_id NOT IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = stmt
+            .query_map(params![ids], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if !wholly_owned.is_empty() {
+        let owned_json = serde_json::to_string(&wholly_owned).unwrap();
+        tx.execute(
+            "DELETE FROM entries WHERE transaction_id IN (SELECT value FROM json_each(?1))",
+            params![owned_json],
+        )?;
+        tx.execute(
+            "DELETE FROM transactions WHERE id IN (SELECT value FROM json_each(?1))",
+            params![owned_json],
+        )?;
+    }
+
+    // What still has an entry on a doomed object is, by construction, a
+    // transaction with survivors.
+    tx.execute(
+        "UPDATE transactions
+            SET status = 'void',
+                notes  = CASE WHEN notes IS NULL OR notes = ''
+                              THEN 'Voided: counterpart account was deleted'
+                              ELSE notes || ' | Voided: counterpart account was deleted' END
+          WHERE id IN (SELECT DISTINCT transaction_id FROM entries
+                        WHERE object_id IN (SELECT value FROM json_each(?1)))",
+        params![ids],
+    )?;
+    tx.execute(
+        "DELETE FROM entries WHERE object_id IN (SELECT value FROM json_each(?1))",
+        params![ids],
+    )?;
+    Ok(())
+}
+
 pub fn delete_object(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
-    tx.execute(
-        "DELETE FROM transactions WHERE id IN (
-           SELECT t.id FROM transactions t
-           WHERE NOT EXISTS (
-             SELECT 1 FROM entries e
-             WHERE e.transaction_id = t.id AND e.object_id <> ?1
-           )
-         )",
-        params![id],
-    )?;
-    tx.execute("DELETE FROM entries WHERE object_id = ?1", params![id])?;
+    detach_objects(&tx, &[id.to_string()])?;
     tx.execute("DELETE FROM financial_objects WHERE id = ?1", params![id])?;
     tx.commit()
 }
@@ -837,6 +869,158 @@ pub fn insert_category(conn: &Connection, c: &Category) -> rusqlite::Result<()> 
         params![c.id, c.name, c.parent_id, c.kind],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalPatch {
+    #[serde(default)] pub name: Option<String>,
+    #[serde(default)] pub target: Option<f64>,
+    #[serde(default)] pub currency: Option<String>,
+    #[serde(default)] pub deadline: Option<String>,
+    #[serde(default, deserialize_with = "double_option")] pub priority: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] pub linked_allocation_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] pub notes: Option<Option<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllocationPatch {
+    #[serde(default)] pub name: Option<String>,
+    #[serde(default, deserialize_with = "double_option")] pub target: Option<Option<f64>>,
+    #[serde(default)] pub target_currency: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryPatch {
+    #[serde(default)] pub name: Option<String>,
+    #[serde(default, deserialize_with = "double_option")] pub parent_id: Option<Option<String>>,
+}
+
+/// Shared "build an UPDATE from whichever fields are present" helper.
+fn run_update(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    sets: Vec<String>,
+    mut owned: Vec<Box<dyn rusqlite::ToSql>>,
+) -> rusqlite::Result<()> {
+    if sets.is_empty() {
+        return Ok(());
+    }
+    owned.push(Box::new(id.to_string()));
+    let sql = format!("UPDATE {table} SET {} WHERE id = ?{}", sets.join(", "), owned.len());
+    let refs: Vec<&dyn rusqlite::ToSql> = owned.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, refs.as_slice())?;
+    Ok(())
+}
+
+pub fn update_goal(conn: &Connection, id: &str, p: &GoalPatch) -> rusqlite::Result<()> {
+    let mut sets = vec![];
+    let mut owned: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    macro_rules! push { ($col:literal, $v:expr) => {{ owned.push(Box::new($v)); sets.push(format!("{} = ?{}", $col, owned.len())); }}; }
+    if let Some(v) = &p.name { push!("name", v.clone()); }
+    if let Some(v) = p.target { push!("target", to_money_minor(Some(v))); }
+    if let Some(v) = &p.currency { push!("currency", v.clone()); }
+    if let Some(v) = &p.deadline { push!("deadline", v.clone()); }
+    if let Some(v) = &p.priority { push!("priority", v.clone()); }
+    if let Some(v) = &p.linked_allocation_id { push!("linked_allocation_id", v.clone()); }
+    if let Some(v) = &p.notes { push!("notes", v.clone()); }
+    run_update(conn, "goals", id, sets, owned)
+}
+
+pub fn delete_goal(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("UPDATE entries SET goal_id = NULL WHERE goal_id = ?1", params![id])?;
+    tx.execute("DELETE FROM goals WHERE id = ?1", params![id])?;
+    tx.commit()
+}
+
+pub fn update_allocation(conn: &Connection, id: &str, p: &AllocationPatch) -> rusqlite::Result<()> {
+    let mut sets = vec![];
+    let mut owned: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    macro_rules! push { ($col:literal, $v:expr) => {{ owned.push(Box::new($v)); sets.push(format!("{} = ?{}", $col, owned.len())); }}; }
+    if let Some(v) = &p.name { push!("name", v.clone()); }
+    if let Some(v) = p.target { push!("target", to_money_minor(v)); }
+    if let Some(v) = &p.target_currency { push!("target_currency", v.clone()); }
+    run_update(conn, "allocations", id, sets, owned)
+}
+
+pub fn delete_allocation(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("UPDATE entries SET allocation_id = NULL WHERE allocation_id = ?1", params![id])?;
+    tx.execute("UPDATE goals SET linked_allocation_id = NULL WHERE linked_allocation_id = ?1", params![id])?;
+    tx.execute("DELETE FROM allocations WHERE id = ?1", params![id])?;
+    tx.commit()
+}
+
+/// Replace a budget's currency and lines wholesale (month and domain are
+/// identity and stay fixed).
+pub fn update_budget(conn: &mut Connection, b: &Budget) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("UPDATE budgets SET currency = ?1 WHERE id = ?2", params![b.currency, b.id])?;
+    tx.execute("DELETE FROM budget_lines WHERE budget_id = ?1", params![b.id])?;
+    for line in &b.lines {
+        tx.execute(
+            "INSERT INTO budget_lines(budget_id, category_id, amount) VALUES (?1,?2,?3)",
+            params![b.id, line.category_id, to_money_minor(Some(line.amount))],
+        )?;
+    }
+    tx.commit()
+}
+
+pub fn delete_budget(conn: &mut Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM budget_lines WHERE budget_id = ?1", params![id])?;
+    tx.execute("DELETE FROM budgets WHERE id = ?1", params![id])?;
+    tx.commit()
+}
+
+pub fn update_category(conn: &Connection, id: &str, p: &CategoryPatch) -> rusqlite::Result<()> {
+    let mut sets = vec![];
+    let mut owned: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    macro_rules! push { ($col:literal, $v:expr) => {{ owned.push(Box::new($v)); sets.push(format!("{} = ?{}", $col, owned.len())); }}; }
+    if let Some(v) = &p.name { push!("name", v.clone()); }
+    if let Some(v) = &p.parent_id { push!("parent_id", v.clone()); }
+    run_update(conn, "categories", id, sets, owned)
+}
+
+/// Delete a category. With `reassign_to` this is a merge: entries and budget
+/// lines move to the target (a line that would duplicate an existing one is
+/// folded into it). Without it, tagged entries become uncategorised and the
+/// category's budget lines are removed. Children are promoted to top level.
+pub fn delete_category(conn: &mut Connection, id: &str, reassign_to: Option<&str>) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    match reassign_to {
+        Some(target) if target != id => {
+            tx.execute("UPDATE entries SET category_id = ?1 WHERE category_id = ?2", params![target, id])?;
+            // fold lines: add into an existing target line, else re-point
+            tx.execute(
+                "UPDATE budget_lines SET amount = amount + (
+                     SELECT l.amount FROM budget_lines l
+                      WHERE l.budget_id = budget_lines.budget_id AND l.category_id = ?2)
+                  WHERE category_id = ?1
+                    AND EXISTS (SELECT 1 FROM budget_lines l
+                                 WHERE l.budget_id = budget_lines.budget_id AND l.category_id = ?2)",
+                params![target, id],
+            )?;
+            tx.execute(
+                "DELETE FROM budget_lines WHERE category_id = ?2
+                   AND EXISTS (SELECT 1 FROM budget_lines l
+                                WHERE l.budget_id = budget_lines.budget_id AND l.category_id = ?1)",
+                params![target, id],
+            )?;
+            tx.execute("UPDATE budget_lines SET category_id = ?1 WHERE category_id = ?2", params![target, id])?;
+        }
+        _ => {
+            tx.execute("UPDATE entries SET category_id = NULL WHERE category_id = ?1", params![id])?;
+            tx.execute("DELETE FROM budget_lines WHERE category_id = ?1", params![id])?;
+        }
+    }
+    tx.execute("UPDATE categories SET parent_id = NULL WHERE parent_id = ?1", params![id])?;
+    tx.execute("DELETE FROM categories WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -897,7 +1081,10 @@ pub fn update_transaction(
     set_field!("description", &patch.description);
     set_field!("kind", &patch.kind);
     set_field!("status", &patch.status);
-    set_field!("notes", &patch.notes);
+    if let Some(v) = &patch.notes {
+        owned.push(Box::new(v.clone()));
+        sets.push(format!("notes = ?{}", owned.len()));
+    }
 
     if !sets.is_empty() {
         owned.push(Box::new(id.to_string()));
@@ -935,7 +1122,7 @@ pub fn upsert_fx_rate(conn: &Connection, fx: &FxRate) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO fx_rates(base, quote, rate) VALUES (?1,?2,?3)
          ON CONFLICT(base, quote) DO UPDATE SET rate = excluded.rate",
-        params![fx.base, fx.quote, to_rate_minor(Some(fx.rate))],
+        params![fx.base, fx.quote, fx.rate],
     )?;
     Ok(())
 }
@@ -966,14 +1153,11 @@ pub fn save_settings(conn: &Connection, s: &WorkspaceSettings) -> rusqlite::Resu
 // Wipe / bulk-insert / replace / seed / reset
 // ---------------------------------------------------------------------------
 
-/// Bundled demo/seed ledger — embedded at compile time. Used both by
-/// ensure_seeded() (first run) and reset_workspace() (Settings > Reset
-/// workspace), so the data lives in exactly one place.
-const SEED_LEDGER_JSON: &str = include_str!("../resources/ledger-seed.json");
 
-/// Truncate every user-owned table. Used by replace_ledger (import,
-/// restore-from-backup, reset).
-fn wipe_user_data(tx: &SqlTransaction) -> rusqlite::Result<()> {
+/// Truncate every ledger table (data only). Used by replace_ledger, which
+/// backs import, restore-from-backup and sync. Those flows replace the
+/// *ledger*; they must not touch the PIN lock or the onboarding/tour flags.
+fn wipe_ledger_data(tx: &SqlTransaction) -> rusqlite::Result<()> {
     // Order matters: children before parents.
     tx.execute("DELETE FROM entries", [])?;
     tx.execute("DELETE FROM transactions", [])?;
@@ -986,12 +1170,14 @@ fn wipe_user_data(tx: &SqlTransaction) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM domains", [])?;
     tx.execute("DELETE FROM fx_rates", [])?;
     tx.execute("DELETE FROM currencies", [])?;
+    Ok(())
+}
 
-    // Settings that describe "is this workspace fresh / what gates it" must
-    // be wiped alongside the data they describe — see the TS version this
-    // replaces for the full reasoning (the PIN-survives-reinstall bug and
-    // the onboarding-skipped-on-reset bug both came from this living
-    // scattered across call sites instead of here).
+/// Full workspace wipe for Settings > Reset workspace: ledger data plus the
+/// settings that describe "is this workspace fresh / what gates it" (PIN,
+/// onboarding, tour). Only reset_workspace should use this.
+fn wipe_user_data(tx: &SqlTransaction) -> rusqlite::Result<()> {
+    wipe_ledger_data(tx)?;
     tx.execute(
         "DELETE FROM settings WHERE key IN ('security_config', 'onboarding_state', 'tour_state')",
         [],
@@ -1010,7 +1196,7 @@ fn bulk_insert_ledger(tx: &SqlTransaction, s: &LedgerState) -> rusqlite::Result<
         tx.execute(
             "INSERT INTO fx_rates(base, quote, rate) VALUES (?1,?2,?3)
              ON CONFLICT(base, quote) DO UPDATE SET rate = excluded.rate",
-            params![fx.base, fx.quote, to_rate_minor(Some(fx.rate))],
+            params![fx.base, fx.quote, fx.rate],
         )?;
     }
     for d in &s.domains {
@@ -1100,41 +1286,125 @@ fn bulk_insert_ledger(tx: &SqlTransaction, s: &LedgerState) -> rusqlite::Result<
     Ok(())
 }
 
+/// Make a ledger that arrived from outside (sync merge, import, backup
+/// restore) internally consistent before it is written: dangling references
+/// are dropped or cleared instead of being inserted. Without this, the entry
+/// reference triggers from migration 0002 would abort the whole replace (and so
+/// the whole sync) because one device deleted an account another device still
+/// had entries for.
+pub fn sanitize_ledger(s: &mut LedgerState) {
+    use std::collections::HashSet;
+    // The built-in "personal" workspace is created locally on first run, so data
+    // pulled from the cloud can arrive before it exists on a fresh device. That
+    // is not a dangling reference: recreate it instead of discarding everything
+    // that belongs to it.
+    let refs_personal = s.objects.iter().any(|o| o.domain_id == "personal")
+        || s.allocations.iter().any(|a| a.domain_id == "personal")
+        || s.goals.iter().any(|g| g.domain_id == "personal")
+        || s.budgets.iter().any(|b| b.domain_id == "personal");
+    if refs_personal && !s.domains.iter().any(|d| d.id == "personal") {
+        s.domains.push(baseline_ledger().domains[0].clone());
+    }
+    let domain_ids: HashSet<String> = s.domains.iter().map(|d| d.id.clone()).collect();
+    s.objects.retain(|o| domain_ids.contains(&o.domain_id));
+    s.allocations.retain(|a| domain_ids.contains(&a.domain_id));
+    s.goals.retain(|g| domain_ids.contains(&g.domain_id));
+    s.budgets.retain(|b| domain_ids.contains(&b.domain_id));
+
+    let cat_ids: HashSet<String> = s.categories.iter().map(|c| c.id.clone()).collect();
+    for c in s.categories.iter_mut() {
+        if matches!(&c.parent_id, Some(p) if !cat_ids.contains(p) || p == &c.id) {
+            c.parent_id = None;
+        }
+    }
+    let object_ids: HashSet<String> = s.objects.iter().map(|o| o.id.clone()).collect();
+    let alloc_ids: HashSet<String> = s.allocations.iter().map(|a| a.id.clone()).collect();
+    let goal_ids: HashSet<String> = s.goals.iter().map(|g| g.id.clone()).collect();
+    for g in s.goals.iter_mut() {
+        if matches!(&g.linked_allocation_id, Some(a) if !alloc_ids.contains(a)) {
+            g.linked_allocation_id = None;
+        }
+    }
+    for b in s.budgets.iter_mut() {
+        b.lines.retain(|l| cat_ids.contains(&l.category_id));
+    }
+
+    let mut dropped = 0usize;
+    for t in s.transactions.iter_mut() {
+        let before = t.entries.len();
+        t.entries.retain(|e| object_ids.contains(&e.object_id));
+        dropped += before - t.entries.len();
+        // A transaction that lost one leg but kept another (e.g. the other
+        // device deleted the receiving account) is one-sided now. Void it with
+        // a note, exactly as a local account deletion does (detach_objects), so
+        // every device ends up with the same result from the same data.
+        if t.entries.len() < before && !t.entries.is_empty() {
+            t.status = Some("void".into());
+            t.notes = Some(match t.notes.take() {
+                Some(n) if !n.is_empty() => format!("{n} | Voided: counterpart account was deleted"),
+                _ => "Voided: counterpart account was deleted".to_string(),
+            });
+        }
+        for e in t.entries.iter_mut() {
+            if matches!(&e.category_id, Some(c) if !cat_ids.contains(c)) { e.category_id = None; }
+            if matches!(&e.allocation_id, Some(a) if !alloc_ids.contains(a)) { e.allocation_id = None; }
+            if matches!(&e.goal_id, Some(g) if !goal_ids.contains(g)) { e.goal_id = None; }
+        }
+    }
+    s.transactions.retain(|t| !t.entries.is_empty());
+    if dropped > 0 {
+        eprintln!("[sanitize_ledger] dropped {dropped} entr(ies) that pointed at missing accounts");
+    }
+}
+
 pub fn replace_ledger(conn: &mut Connection, s: &LedgerState) -> rusqlite::Result<()> {
+    let mut clean = s.clone();
+    sanitize_ledger(&mut clean);
     let tx = conn.transaction()?;
-    wipe_user_data(&tx)?;
-    bulk_insert_ledger(&tx, s)?;
+    wipe_ledger_data(&tx)?;
+    bulk_insert_ledger(&tx, &clean)?;
     tx.commit()
 }
 
-/// If the database has never been seeded (no `workspace_initialized`
-/// setting), parse the embedded demo seed and insert it, marking the
-/// workspace initialized in the same transaction so a crash mid-seed
-/// leaves a clean re-seed state on next boot. Returns true iff it ran.
-pub fn ensure_seeded(conn: &mut Connection) -> rusqlite::Result<bool> {
+/// The only row the app creates on its own. The UI addresses the built-in
+/// domain by the fixed id "personal", so it has to exist for anything to be
+/// added at all. It is an empty container: no accounts, categories,
+/// transactions, budgets, goals or exchange rates are ever generated.
+fn baseline_ledger() -> LedgerState {
+    LedgerState {
+        currencies: vec![],
+        fx: vec![],
+        domains: vec![Domain {
+            id: "personal".to_string(),
+            name: "Personal".to_string(),
+            kind: "personal".to_string(),
+            display_currency: None,
+            description: None,
+        }],
+        objects: vec![],
+        categories: vec![],
+        allocations: vec![],
+        goals: vec![],
+        budgets: vec![],
+        transactions: vec![],
+        settings: None,
+    }
+}
+
+/// First run only: make sure the built-in Personal domain exists and mark the
+/// workspace initialised. Strictly additive — it never removes or replaces
+/// rows, because data may already be here (for example pulled from the cloud
+/// before the workspace was ever opened). Returns true iff it ran.
+pub fn ensure_initialized(conn: &mut Connection) -> rusqlite::Result<bool> {
     let marker = get_setting(conn, "workspace_initialized")?;
     if matches!(marker, Some(Json::Bool(true))) {
         return Ok(false);
     }
-
-    let seed: LedgerState = match serde_json::from_str(SEED_LEDGER_JSON) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[ensure_seeded] seed JSON failed to parse: {e}");
-            set_setting(conn, "workspace_initialized", &Json::Bool(true))?;
-            return Ok(false);
-        }
-    };
-
-    if seed.domains.is_empty() {
-        // Nothing to seed (empty resource) — mark initialized anyway so we
-        // don't retry every boot; an empty ledger is a valid starting point.
-        set_setting(conn, "workspace_initialized", &Json::Bool(true))?;
-        return Ok(false);
-    }
-
     let tx = conn.transaction()?;
-    bulk_insert_ledger(&tx, &seed)?;
+    let existing = select_ledger_state(&tx)?;
+    if !existing.domains.iter().any(|d| d.id == "personal") {
+        insert_domain(&tx, &baseline_ledger().domains[0])?;
+    }
     let json = serde_json::to_string(&Json::Bool(true)).unwrap();
     tx.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2) \
@@ -1145,27 +1415,124 @@ pub fn ensure_seeded(conn: &mut Connection) -> rusqlite::Result<bool> {
     Ok(true)
 }
 
-/// Settings > Reset workspace: wipe everything and re-seed the same demo
-/// data ensure_seeded() would install on a fresh workspace (matches the
-/// pre-migration behavior — reset restores the starter demo data, not an
-/// empty ledger).
+/// Settings > Reset workspace: wipe everything (including PIN, onboarding and
+/// tour state) and return to the empty baseline. Nothing is re-populated.
 pub fn reset_workspace(conn: &mut Connection) -> rusqlite::Result<()> {
-    let seed: LedgerState = serde_json::from_str(SEED_LEDGER_JSON).unwrap_or(LedgerState {
-        currencies: vec![],
-        fx: vec![],
-        domains: vec![],
-        objects: vec![],
-        categories: vec![],
-        allocations: vec![],
-        goals: vec![],
-        budgets: vec![],
-        transactions: vec![],
-        settings: None,
-    });
     let tx = conn.transaction()?;
     wipe_user_data(&tx)?;
-    bulk_insert_ledger(&tx, &seed)?;
+    bulk_insert_ledger(&tx, &baseline_ledger())?;
     tx.commit()
+}
+
+// ---------------------------------------------------------------------------
+// Cloud sync: apply entities pulled from the server
+// ---------------------------------------------------------------------------
+
+/// One entity as it arrives from the cloud: `kind` + `id` identify it (for
+/// `fx` the id is the base currency; `settings` and `currencies` are
+/// singletons with id "_"), `data` is its JSON body, `deleted` marks a
+/// tombstone.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteChange {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub data: Option<Json>,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ApplyResult {
+    pub applied: usize,
+    /// Rows that could not be understood (unknown kind or malformed body).
+    /// They are skipped rather than failing the whole batch, and reported so
+    /// the caller can surface it.
+    pub skipped: usize,
+}
+
+fn upsert_by_id<T, F: Fn(&T) -> &str>(items: &mut Vec<T>, id: &str, item: Option<T>, key: F) {
+    items.retain(|x| key(x) != id);
+    if let Some(it) = item {
+        items.push(it);
+    }
+}
+
+/// Apply a batch of pulled changes in ONE transaction, entirely on the Rust
+/// side: read the current ledger, fold the changes in, and write it back.
+/// Doing this here (not as JS-side replace) means a sync can never clobber an
+/// edit the user made while it was in flight — the Mutex orders them — and
+/// the PIN / onboarding / tour settings are untouched (wipe_ledger_data).
+pub fn apply_remote_changes(conn: &mut Connection, changes: &[RemoteChange]) -> rusqlite::Result<ApplyResult> {
+    let tx = conn.transaction()?;
+    let mut st = select_ledger_state(&tx)?;
+    let mut out = ApplyResult::default();
+
+    macro_rules! typed {
+        ($ty:ty, $c:expr) => {
+            if $c.deleted {
+                Some(None)
+            } else {
+                match $c.data.clone().map(serde_json::from_value::<$ty>) {
+                    Some(Ok(v)) => Some(Some(v)),
+                    _ => None,
+                }
+            }
+        };
+    }
+
+    for c in changes {
+        let ok = match c.kind.as_str() {
+            "domain" => typed!(Domain, c).map(|v| upsert_by_id(&mut st.domains, &c.id, v, |x| &x.id)).is_some(),
+            "object" => typed!(FinancialObject, c).map(|v| upsert_by_id(&mut st.objects, &c.id, v, |x| &x.id)).is_some(),
+            "category" => typed!(Category, c).map(|v| upsert_by_id(&mut st.categories, &c.id, v, |x| &x.id)).is_some(),
+            "allocation" => typed!(Allocation, c).map(|v| upsert_by_id(&mut st.allocations, &c.id, v, |x| &x.id)).is_some(),
+            "goal" => typed!(Goal, c).map(|v| upsert_by_id(&mut st.goals, &c.id, v, |x| &x.id)).is_some(),
+            "budget" => typed!(Budget, c).map(|v| upsert_by_id(&mut st.budgets, &c.id, v, |x| &x.id)).is_some(),
+            "transaction" => typed!(Transaction, c).map(|v| upsert_by_id(&mut st.transactions, &c.id, v, |x| &x.id)).is_some(),
+            "fx" => typed!(FxRate, c)
+                .map(|v| {
+                    st.fx.retain(|x| x.base != c.id);
+                    if let Some(rate) = v {
+                        st.fx.push(rate);
+                    }
+                })
+                .is_some(),
+            "settings" => typed!(WorkspaceSettings, c)
+                .map(|v| {
+                    if v.is_some() {
+                        st.settings = v;
+                    }
+                })
+                .is_some(),
+            "currencies" => typed!(Vec<String>, c)
+                .map(|v| {
+                    if let Some(list) = v {
+                        st.currencies = list;
+                    }
+                })
+                .is_some(),
+            _ => false,
+        };
+        if ok {
+            out.applied += 1;
+        } else {
+            out.skipped += 1;
+        }
+    }
+
+    if out.applied > 0 {
+        // Another device may have deleted an account (or goal, category...) that
+        // an entry on THIS device still points at. Written as-is, the entry
+        // reference triggers (migration 0002) would abort the whole batch, and
+        // the same batch would fail again on every later sync. Drop the dangling
+        // references first.
+        sanitize_ledger(&mut st);
+        wipe_ledger_data(&tx)?;
+        bulk_insert_ledger(&tx, &st)?;
+    }
+    tx.commit()?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,9 +1545,9 @@ fn lock<'a>(state: &'a tauri::State<'a, DbState>) -> Result<std::sync::MutexGuar
 }
 
 #[tauri::command]
-pub fn db_ensure_seeded(state: tauri::State<DbState>) -> Result<bool, String> {
+pub fn db_ensure_initialized(state: tauri::State<DbState>) -> Result<bool, String> {
     let mut conn = lock(&state)?;
-    ensure_seeded(&mut conn).map_err(|e| e.to_string())
+    ensure_initialized(&mut conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1320,9 +1687,66 @@ pub fn db_set_setting(state: tauri::State<DbState>, key: String, value: Json) ->
 }
 
 #[tauri::command]
+pub fn db_update_goal(state: tauri::State<DbState>, id: String, patch: GoalPatch) -> Result<(), String> {
+    let conn = lock(&state)?;
+    update_goal(&conn, &id, &patch).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_goal(state: tauri::State<DbState>, id: String) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    delete_goal(&mut conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_update_allocation(state: tauri::State<DbState>, id: String, patch: AllocationPatch) -> Result<(), String> {
+    let conn = lock(&state)?;
+    update_allocation(&conn, &id, &patch).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_allocation(state: tauri::State<DbState>, id: String) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    delete_allocation(&mut conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_update_budget(state: tauri::State<DbState>, budget: Budget) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    update_budget(&mut conn, &budget).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_budget(state: tauri::State<DbState>, id: String) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    delete_budget(&mut conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_update_category(state: tauri::State<DbState>, id: String, patch: CategoryPatch) -> Result<(), String> {
+    let conn = lock(&state)?;
+    update_category(&conn, &id, &patch).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_category(state: tauri::State<DbState>, id: String, reassign_to: Option<String>) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    delete_category(&mut conn, &id, reassign_to.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn db_replace_ledger(state: tauri::State<DbState>, ledger: LedgerState) -> Result<(), String> {
     let mut conn = lock(&state)?;
     replace_ledger(&mut conn, &ledger).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_apply_remote_changes(
+    state: tauri::State<DbState>,
+    changes: Vec<RemoteChange>,
+) -> Result<ApplyResult, String> {
+    let mut conn = lock(&state)?;
+    apply_remote_changes(&mut conn, &changes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1550,12 +1974,99 @@ mod tests {
     }
 
     #[test]
-    fn ensure_seeded_only_runs_once() {
+    fn first_run_creates_only_an_empty_personal_domain() {
         let mut conn = test_conn();
-        let ran_first = ensure_seeded(&mut conn).unwrap();
-        let ran_second = ensure_seeded(&mut conn).unwrap();
-        assert!(ran_first, "first call should seed");
-        assert!(!ran_second, "second call should be a no-op");
+        assert!(ensure_initialized(&mut conn).unwrap(), "first call initialises");
+        assert!(!ensure_initialized(&mut conn).unwrap(), "second call is a no-op");
+        let st = select_ledger_state(&conn).unwrap();
+        assert_eq!(st.domains.len(), 1);
+        assert_eq!(st.domains[0].id, "personal");
+        assert!(st.objects.is_empty());
+        assert!(st.categories.is_empty());
+        assert!(st.transactions.is_empty());
+        assert!(st.allocations.is_empty());
+        assert!(st.goals.is_empty());
+        assert!(st.budgets.is_empty());
+        assert!(st.fx.is_empty(), "no exchange rates may be invented");
+        assert!(st.currencies.is_empty());
+    }
+
+    #[test]
+    fn initialising_never_overwrites_data_that_is_already_there() {
+        let mut conn = test_conn();
+        // Cloud data arrives BEFORE the workspace was ever initialised.
+        let changes: Vec<RemoteChange> = serde_json::from_value(serde_json::json!([
+            {"kind":"domain","id":"personal","data":{"id":"personal","name":"Home","kind":"personal"}},
+            {"kind":"object","id":"o1","data":{"id":"o1","domainId":"personal","name":"Cash","kind":"cash","currency":"USD"}}
+        ])).unwrap();
+        apply_remote_changes(&mut conn, &changes).unwrap();
+
+        assert!(ensure_initialized(&mut conn).unwrap());
+        let st = select_ledger_state(&conn).unwrap();
+        assert_eq!(st.objects.len(), 1, "synced account must survive initialisation");
+        assert_eq!(st.domains.len(), 1);
+        assert_eq!(st.domains[0].name, "Home", "synced Personal domain must not be replaced");
+    }
+
+    #[test]
+    fn reset_returns_to_the_same_empty_baseline() {
+        let mut conn = test_conn();
+        ensure_initialized(&mut conn).unwrap();
+        reset_workspace(&mut conn).unwrap();
+        let st = select_ledger_state(&conn).unwrap();
+        assert_eq!(st.domains.len(), 1);
+        assert!(st.objects.is_empty() && st.transactions.is_empty() && st.fx.is_empty());
+    }
+
+    #[test]
+    fn apply_remote_changes_folds_in_upserts_and_tombstones_atomically() {
+        let mut conn = test_conn();
+        ensure_initialized(&mut conn).unwrap();
+        // user-owned settings that a sync must never touch
+        set_setting(&conn, "security_config", &serde_json::json!({"pinHash": "x"})).unwrap();
+        set_setting(&conn, "onboarding_state", &serde_json::json!({"complete": true})).unwrap();
+
+        let changes: Vec<RemoteChange> = serde_json::from_value(serde_json::json!([
+            {"kind":"object","id":"o1","data":{"id":"o1","domainId":"personal","name":"Cash","kind":"cash","currency":"USD"}},
+            {"kind":"transaction","id":"t1","data":{"id":"t1","date":"2026-01-02","description":"Coffee","kind":"expense","entries":[{"objectId":"o1","amount":-3.5}]}},
+            {"kind":"fx","id":"NGN","data":{"base":"NGN","quote":"USD","rate":0.001}},
+            {"kind":"currencies","id":"_","data":["USD","NGN"]},
+            {"kind":"bogus","id":"z","data":{}},
+            {"kind":"goal","id":"g1","data":{"not":"a goal"}}
+        ])).unwrap();
+        let r = apply_remote_changes(&mut conn, &changes).unwrap();
+        assert_eq!(r, ApplyResult { applied: 4, skipped: 2 });
+
+        let st = select_ledger_state(&conn).unwrap();
+        assert_eq!(st.objects.len(), 1);
+        assert_eq!(st.transactions.len(), 1);
+        assert_eq!(st.fx.len(), 1);
+        assert_eq!(st.currencies, vec!["NGN".to_string(), "USD".to_string()]);
+        assert!(st.goals.is_empty(), "malformed goal must not be applied");
+        assert!(get_setting(&conn, "security_config").unwrap().is_some(), "PIN untouched");
+        assert!(get_setting(&conn, "onboarding_state").unwrap().is_some(), "onboarding untouched");
+
+        // tombstones remove; a re-upsert replaces rather than duplicates
+        let changes: Vec<RemoteChange> = serde_json::from_value(serde_json::json!([
+            {"kind":"transaction","id":"t1","deleted":true},
+            {"kind":"object","id":"o1","data":{"id":"o1","domainId":"personal","name":"Wallet","kind":"cash","currency":"USD"}},
+            {"kind":"fx","id":"NGN","deleted":true}
+        ])).unwrap();
+        apply_remote_changes(&mut conn, &changes).unwrap();
+        let st = select_ledger_state(&conn).unwrap();
+        assert!(st.transactions.is_empty());
+        assert_eq!(st.objects.len(), 1);
+        assert_eq!(st.objects[0].name, "Wallet");
+        assert!(st.fx.is_empty());
+    }
+
+    #[test]
+    fn apply_remote_changes_with_nothing_applicable_leaves_data_alone() {
+        let mut conn = test_conn();
+        ensure_initialized(&mut conn).unwrap();
+        let r = apply_remote_changes(&mut conn, &[]).unwrap();
+        assert_eq!(r, ApplyResult { applied: 0, skipped: 0 });
+        assert_eq!(select_ledger_state(&conn).unwrap().domains.len(), 1);
     }
 
     #[test]
@@ -1566,5 +2077,187 @@ mod tests {
 
         assert_eq!(to_rate_minor(Some(0.00066)), Some(660));
         assert_eq!(from_rate_minor(Some(660)), Some(0.00066));
+    }
+
+    #[test]
+    fn replace_ledger_keeps_pin_and_onboarding_but_reset_clears_them() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let ledger: LedgerState = serde_json::from_str(
+            r#"{"currencies":["USD"],"fx":[],"domains":[{"id":"personal","name":"Personal","kind":"personal"}],
+                "objects":[],"categories":[],"allocations":[],"goals":[],"budgets":[],"transactions":[]}"#,
+        )
+        .unwrap();
+        for k in ["security_config", "onboarding_state", "tour_state"] {
+            set_setting(&conn, k, &serde_json::json!({ "marker": k })).unwrap();
+        }
+        // import / restore / sync path
+        replace_ledger(&mut conn, &ledger).unwrap();
+        for k in ["security_config", "onboarding_state", "tour_state"] {
+            assert!(get_setting(&conn, k).unwrap().is_some(), "{k} must survive replace_ledger");
+        }
+        // Settings > Reset workspace path
+        reset_workspace(&mut conn).unwrap();
+        for k in ["security_config", "onboarding_state", "tour_state"] {
+            assert!(get_setting(&conn, k).unwrap().is_none(), "{k} must be cleared by reset_workspace");
+        }
+
+    }
+
+    // ---- audit-fix regression tests -------------------------------------
+
+    fn mk_obj(id: &str, dom: &str, kind: &str) -> FinancialObject {
+        FinancialObject { id: id.into(), domain_id: dom.into(), name: id.into(), institution: Some("Bank".into()), kind: kind.into(), currency: "NGN".into(), interest_rate: None, min_payment: None, credit_limit: Some(500000.0), due_day: Some(5) }
+    }
+    fn two_domain_ledger() -> LedgerState {
+        LedgerState {
+            currencies: vec!["NGN".into()],
+            fx: vec![FxRate { base: "NGN".into(), quote: "USD".into(), rate: 1.0 / 1550.0 }],
+            domains: vec![
+                Domain { id: "personal".into(), name: "Personal".into(), kind: "personal".into(), display_currency: None, description: None },
+                Domain { id: "biz".into(), name: "Biz".into(), kind: "business".into(), display_currency: None, description: None },
+            ],
+            objects: vec![mk_obj("a", "personal", "account"), mk_obj("b", "biz", "account")],
+            categories: vec![], allocations: vec![], goals: vec![], budgets: vec![], transactions: vec![], settings: None,
+        }
+    }
+    fn entry(obj: &str, amt: f64) -> Entry {
+        Entry { object_id: obj.into(), amount: amt, category_id: None, allocation_id: None, goal_id: None }
+    }
+    fn tx_of(id: &str, kind: &str, entries: Vec<Entry>) -> Transaction {
+        Transaction { id: id.into(), date: "2026-09-01".into(), description: id.into(), kind: kind.into(), status: None, notes: None, entries }
+    }
+
+    #[test]
+    fn fx_rate_keeps_full_precision() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        replace_ledger(&mut c, &two_domain_ledger()).unwrap();
+        let back = select_ledger_state(&c).unwrap().fx[0].rate;
+        assert!((back - 1.0 / 1550.0).abs() < 1e-15, "got {back}");
+    }
+
+    #[test]
+    fn deleting_an_account_voids_half_transfers_and_spares_unrelated_rows() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        replace_ledger(&mut c, &two_domain_ledger()).unwrap();
+        insert_transaction(&mut c, &tx_of("xfer", "transfer", vec![entry("a", -1000.0), entry("b", 1000.0)])).unwrap();
+        insert_transaction(&mut c, &tx_of("only_a", "income", vec![entry("a", 50.0)])).unwrap();
+        c.execute("INSERT INTO transactions(id, occurred_at, description, kind) VALUES ('empty','2026-09-01','no entries','income')", []).unwrap();
+        delete_object(&mut c, "a").unwrap();
+        let st = select_ledger_state(&c).unwrap();
+        assert!(st.transactions.iter().all(|t| t.id != "only_a"), "wholly-owned tx must be deleted");
+        let x = st.transactions.iter().find(|t| t.id == "xfer").expect("transfer history kept");
+        assert_eq!(x.status.as_deref(), Some("void"));
+        assert!(x.notes.as_deref().unwrap_or("").contains("counterpart"));
+        assert_eq!(x.entries.len(), 1);
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM transactions WHERE id='empty'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "unrelated entry-less tx must survive");
+        let bal: i64 = c.query_row("SELECT COALESCE(SUM(balance_minor),0) FROM v_object_balances WHERE object_id='b'", [], |r| r.get(0)).unwrap();
+        assert_eq!(bal, 0, "void leg must not count toward the survivor's balance (view excludes void)");
+    }
+
+    #[test]
+    fn object_patch_can_clear_optional_fields() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        replace_ledger(&mut c, &two_domain_ledger()).unwrap();
+        let untouched: ObjectPatch = serde_json::from_str(r#"{"name":"renamed"}"#).unwrap();
+        update_object(&c, "a", &untouched).unwrap();
+        let st = select_ledger_state(&c).unwrap();
+        let o = st.objects.iter().find(|o| o.id == "a").unwrap();
+        assert_eq!((o.name.as_str(), o.credit_limit, o.institution.as_deref()), ("renamed", Some(500000.0), Some("Bank")));
+        let clear: ObjectPatch = serde_json::from_str(r#"{"creditLimit":null,"institution":null,"dueDay":null}"#).unwrap();
+        update_object(&c, "a", &clear).unwrap();
+        let st = select_ledger_state(&c).unwrap();
+        let o = st.objects.iter().find(|o| o.id == "a").unwrap();
+        assert_eq!((o.credit_limit, o.institution.clone(), o.due_day), (None, None, None));
+    }
+
+    #[test]
+    fn entries_cannot_point_at_missing_rows_but_replace_ledger_sanitizes_instead_of_failing() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        replace_ledger(&mut c, &two_domain_ledger()).unwrap();
+        let bad = insert_transaction(&mut c, &tx_of("ghost", "expense", vec![entry("nope", -5.0)]));
+        assert!(bad.is_err(), "trigger must reject an entry on a nonexistent object");
+        // a merged ledger that still references a deleted account must not abort the sync
+        let mut l = two_domain_ledger();
+        let mut dangling = tx_of("t_dangling", "expense", vec![entry("a", -1.0)]);
+        dangling.entries[0].category_id = Some("cat_gone".into());
+        l.transactions = vec![dangling, tx_of("t_orphan", "expense", vec![entry("deleted_elsewhere", -9.0)])];
+        replace_ledger(&mut c, &l).unwrap();
+        let st = select_ledger_state(&c).unwrap();
+        assert_eq!(st.transactions.len(), 1);
+        assert_eq!(st.transactions[0].entries[0].category_id, None);
+    }
+
+    #[test]
+    fn goal_allocation_category_delete_leave_no_dangling_tags() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        let mut l = two_domain_ledger();
+        l.categories = vec![
+            Category { id: "c1".into(), name: "Food".into(), parent_id: None, kind: "expense".into() },
+            Category { id: "c2".into(), name: "Dining".into(), parent_id: Some("c1".into()), kind: "expense".into() },
+        ];
+        l.allocations = vec![Allocation { id: "al".into(), domain_id: "personal".into(), name: "Rainy".into(), target: Some(100.0), target_currency: "NGN".into() }];
+        l.goals = vec![Goal { id: "g".into(), domain_id: "personal".into(), name: "Car".into(), target: 1000.0, currency: "NGN".into(), deadline: "2027-01-01".into(), priority: None, linked_allocation_id: Some("al".into()), notes: None }];
+        let mut e = entry("a", -10.0);
+        e.category_id = Some("c2".into()); e.allocation_id = Some("al".into()); e.goal_id = Some("g".into());
+        l.transactions = vec![tx_of("t1", "expense", vec![e])];
+        l.budgets = vec![Budget { id: "b1".into(), domain_id: "personal".into(), month: "2026-09".into(), currency: "NGN".into(), lines: vec![BudgetLine { category_id: "c1".into(), amount: 50.0 }, BudgetLine { category_id: "c2".into(), amount: 20.0 }] }];
+        replace_ledger(&mut c, &l).unwrap();
+
+        delete_category(&mut c, "c2", Some("c1")).unwrap(); // merge Dining -> Food
+        let st = select_ledger_state(&c).unwrap();
+        assert_eq!(st.transactions[0].entries[0].category_id.as_deref(), Some("c1"));
+        assert_eq!(st.budgets[0].lines.len(), 1);
+        assert_eq!(st.budgets[0].lines[0].amount, 70.0, "merged budget lines are summed");
+
+        delete_goal(&mut c, "g").unwrap();
+        delete_allocation(&mut c, "al").unwrap();
+        let st = select_ledger_state(&c).unwrap();
+        let e = &st.transactions[0].entries[0];
+        assert_eq!((e.goal_id.clone(), e.allocation_id.clone()), (None, None));
+        assert!(st.goals.is_empty() && st.allocations.is_empty());
+        delete_budget(&mut c, "b1").unwrap();
+        assert!(select_ledger_state(&c).unwrap().budgets.is_empty());
+    }
+
+    #[test]
+    fn remote_deletion_of_an_account_cannot_poison_the_sync() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap();
+        replace_ledger(&mut c, &two_domain_ledger()).unwrap();
+        insert_transaction(&mut c, &tx_of("xfer", "transfer", vec![entry("a", -1000.0), entry("b", 1000.0)])).unwrap();
+        insert_transaction(&mut c, &tx_of("solo", "income", vec![entry("a", 5.0)])).unwrap();
+        // the other device deleted account "a"
+        let r = apply_remote_changes(&mut c, &[RemoteChange { kind: "object".into(), id: "a".into(), data: None, deleted: true }]);
+        assert!(r.is_ok(), "must not abort on dangling entries: {r:?}");
+        let st = select_ledger_state(&c).unwrap();
+        assert!(st.objects.iter().all(|o| o.id != "a"));
+        assert!(st.transactions.iter().all(|t| t.id != "solo"), "wholly-owned tx is dropped");
+        let x = st.transactions.iter().find(|t| t.id == "xfer").unwrap();
+        assert_eq!(x.status.as_deref(), Some("void"));
+        assert_eq!(x.entries.len(), 1);
+    }
+
+    #[test]
+    fn cloud_data_arriving_before_the_personal_domain_exists_is_kept() {
+        let mut c = Connection::open_in_memory().unwrap();
+        run_migrations(&mut c).unwrap(); // fresh device: no domains yet
+        let obj = serde_json::to_value(mk_obj("sav", "personal", "account")).unwrap();
+        let t = serde_json::to_value(tx_of("salary", "income", vec![entry("sav", 100.0)])).unwrap();
+        let r = apply_remote_changes(&mut c, &[
+            RemoteChange { kind: "object".into(), id: "sav".into(), data: Some(obj), deleted: false },
+            RemoteChange { kind: "transaction".into(), id: "salary".into(), data: Some(t), deleted: false },
+        ]).unwrap();
+        assert_eq!(r.applied, 2);
+        let st = select_ledger_state(&c).unwrap();
+        assert_eq!(st.objects.len(), 1, "synced account must survive");
+        assert_eq!(st.transactions.len(), 1, "synced transaction must survive");
+        assert!(st.domains.iter().any(|d| d.id == "personal"));
     }
 }

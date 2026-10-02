@@ -31,7 +31,10 @@ describe("diffLedgerState", () => {
 
   it("reports an upsert when a new row is added to an id-keyed array", () => {
     const prev = empty();
-    const next = { ...prev, domains: [{ id: "dom_1", name: "Personal", kind: "personal" as const }] };
+    const next = {
+      ...prev,
+      domains: [{ id: "dom_1", name: "Personal", kind: "personal" as const }],
+    };
     expect(collect(prev, next)).toEqual([{ kind: "domain", id: "dom_1", action: "upsert" }]);
   });
 
@@ -49,7 +52,9 @@ describe("diffLedgerState", () => {
     // transaction was added elsewhere — only the transaction should fire.
     const next = {
       ...prev,
-      transactions: [{ id: "tx_1", date: "2026-01-01", description: "x", kind: "expense" as const, entries: [] }],
+      transactions: [
+        { id: "tx_1", date: "2026-01-01", description: "x", kind: "expense" as const, entries: [] },
+      ],
     };
     expect(collect(prev, next)).toEqual([{ kind: "transaction", id: "tx_1", action: "upsert" }]);
   });
@@ -62,7 +67,10 @@ describe("diffLedgerState", () => {
   });
 
   it("diffs fx by `base`, not `id` (FxRate has no id field)", () => {
-    const prev = { ...empty(), fx: [{ base: "NGN" as const, quote: "USD" as const, rate: 0.00066 }] };
+    const prev = {
+      ...empty(),
+      fx: [{ base: "NGN" as const, quote: "USD" as const, rate: 0.00066 }],
+    };
     const next = {
       ...prev,
       fx: [
@@ -109,12 +117,21 @@ describe("diffLedgerState", () => {
 
   it("handles a mixed batch of changes across several kinds in one diff", () => {
     const keptDomain = { id: "dom_1", name: "Personal", kind: "personal" as const };
-    const deletedGoal = { id: "goal_1", domainId: "dom_1", name: "Trip", target: 1000, currency: "USD" as const, deadline: "2027-01-01" };
+    const deletedGoal = {
+      id: "goal_1",
+      domainId: "dom_1",
+      name: "Trip",
+      target: 1000,
+      currency: "USD" as const,
+      deadline: "2027-01-01",
+    };
     const prev = { ...empty(), domains: [keptDomain], goals: [deletedGoal] };
     const next = {
       ...prev,
       goals: [],
-      transactions: [{ id: "tx_1", date: "2026-01-01", description: "x", kind: "expense" as const, entries: [] }],
+      transactions: [
+        { id: "tx_1", date: "2026-01-01", description: "x", kind: "expense" as const, entries: [] },
+      ],
     };
     const events = collect(prev, next);
     expect(events).toContainEqual({ kind: "goal", id: "goal_1", action: "delete" });

@@ -56,7 +56,13 @@ export function Hero({
             <div
               className={[
                 "hero-num text-[4.5rem] md:text-[6rem] animate-ticker-in",
-                valueTone === "pos" ? "text-pos" : valueTone === "neg" ? "text-neg" : valueTone === "muted" ? "text-muted-foreground line-through" : "",
+                valueTone === "pos"
+                  ? "text-pos"
+                  : valueTone === "neg"
+                    ? "text-neg"
+                    : valueTone === "muted"
+                      ? "text-muted-foreground line-through"
+                      : "",
               ].join(" ")}
             >
               {value}
@@ -122,7 +128,9 @@ export function PageHeader({
           </div>
         )}
         <h1 className="display text-3xl md:text-4xl text-balance">{title}</h1>
-        {description && <p className="text-sm text-muted-foreground mt-2 max-w-xl">{description}</p>}
+        {description && (
+          <p className="text-sm text-muted-foreground mt-2 max-w-xl">{description}</p>
+        )}
       </div>
       {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
     </div>
@@ -156,13 +164,7 @@ export function Stat({
   );
 }
 
-export function SectionTitle({
-  children,
-  action,
-}: {
-  children: ReactNode;
-  action?: ReactNode;
-}) {
+export function SectionTitle({ children, action }: { children: ReactNode; action?: ReactNode }) {
   return (
     <div className="flex items-center justify-between mb-4">
       <h2 className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground font-medium">

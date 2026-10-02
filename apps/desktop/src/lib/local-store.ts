@@ -5,11 +5,12 @@
 // localStorage in a Tauri WebView survives an uninstall/reinstall (and,
 // independently, a "Reset workspace") which silently defeated all three:
 // a stale PIN kept gating data it was never set for, and a stale
-// onboarding-complete flag meant a freshly reset/reseeded workspace would
-// silently skip onboarding and just show the demo seed data untouched.
+// onboarding-complete flag meant a freshly reset workspace would silently
+// skip onboarding.
 // Users & Permissions and display name are genuinely device-local
 // preferences (who's using this computer, not what's in the ledger) and
 // stay in localStorage.
+import { queryClient, appKeys } from "@/lib/query-client";
 import { getSetting, setSetting } from "@/lib/db";
 import { toast } from "sonner";
 
@@ -20,10 +21,10 @@ const has = () => typeof window !== "undefined";
 const SEC_SETTING_KEY = "security_config";
 
 export type SecurityConfig = {
-  pinHash: string | null;      // SHA-256 hex of `${salt}:${pin}`, null when unset
+  pinHash: string | null; // SHA-256 hex of `${salt}:${pin}`, null when unset
   salt: string | null;
   lockOnStart: boolean;
-  autoLockMinutes: number;     // 0 = never
+  autoLockMinutes: number; // 0 = never
   updatedAt: string;
 };
 
@@ -41,8 +42,11 @@ export async function loadSecurity(): Promise<SecurityConfig> {
     if (!raw || typeof raw !== "object") return DEFAULT_SECURITY;
     return { ...DEFAULT_SECURITY, ...(raw as Partial<SecurityConfig>) };
   } catch (err) {
+    // Fail CLOSED. This used to return DEFAULT_SECURITY (no PIN), so a failed
+    // read of the stored config silently unlocked a PIN-protected workspace.
+    // Rethrowing surfaces the error (route error page / query error) instead.
     console.error("[security] loadSecurity failed:", err);
-    return DEFAULT_SECURITY;
+    throw err;
   }
 }
 
@@ -53,7 +57,7 @@ export async function saveSecurity(cfg: SecurityConfig) {
     throw new Error(msg);
   }
   await setSetting(SEC_SETTING_KEY, cfg);
-  if (has()) window.dispatchEvent(new CustomEvent("ledgerone:security-changed"));
+  if (has()) void queryClient.invalidateQueries({ queryKey: appKeys.security });
 }
 
 function randomSalt(): string {
@@ -68,7 +72,10 @@ export async function hashPin(pin: string, salt: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function setPin(pin: string, opts: Partial<Omit<SecurityConfig, "pinHash" | "salt" | "updatedAt">> = {}) {
+export async function setPin(
+  pin: string,
+  opts: Partial<Omit<SecurityConfig, "pinHash" | "salt" | "updatedAt">> = {},
+) {
   const cfg = await loadSecurity();
   const salt = cfg.salt ?? randomSalt();
   const pinHash = await hashPin(pin, salt);
@@ -147,7 +154,7 @@ export function saveUsers(users: LocalUser[]) {
     throw new Error(msg);
   }
   window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  window.dispatchEvent(new CustomEvent("ledgerone:users-changed"));
+  void queryClient.invalidateQueries({ queryKey: appKeys.users });
 }
 
 export function getActiveUserId(): string | null {
@@ -163,14 +170,13 @@ function setActiveUserId(id: string | null) {
   if (!has()) return;
   if (id == null) window.localStorage.removeItem(ACTIVE_USER_KEY);
   else window.localStorage.setItem(ACTIVE_USER_KEY, id);
-  window.dispatchEvent(new CustomEvent("ledgerone:users-changed"));
+  void queryClient.invalidateQueries({ queryKey: appKeys.users });
 }
 
 const ROLE_RANK: Record<UserRole, number> = { viewer: 0, editor: 1, admin: 2 };
 
 export type ActivateUserResult =
-  | { ok: true }
-  | { ok: false; reason: "pin-required" | "pin-incorrect" };
+  { ok: true } | { ok: false; reason: "pin-required" | "pin-incorrect" };
 
 /**
  * Switch which local user is active on this device.
@@ -262,7 +268,7 @@ export function saveDisplayName(name: string) {
   const v = name.trim();
   if (v) window.localStorage.setItem(NAME_KEY, v);
   else window.localStorage.removeItem(NAME_KEY);
-  window.dispatchEvent(new CustomEvent("ledgerone:display-name-changed"));
+  void queryClient.invalidateQueries({ queryKey: appKeys.displayName });
 }
 
 // ---------- Tour ----------
@@ -287,13 +293,16 @@ export async function loadTour(): Promise<TourState> {
 }
 
 export async function setTourComplete() {
-  await setSetting(TOUR_SETTING_KEY, { complete: true, completedAt: new Date().toISOString() } satisfies TourState);
-  if (has()) window.dispatchEvent(new CustomEvent("ledgerone:tour-changed"));
+  await setSetting(TOUR_SETTING_KEY, {
+    complete: true,
+    completedAt: new Date().toISOString(),
+  } satisfies TourState);
+  if (has()) void queryClient.invalidateQueries({ queryKey: appKeys.tour });
 }
 
 export async function startTour() {
   await setSetting(TOUR_SETTING_KEY, { complete: false, completedAt: null } satisfies TourState);
-  if (has()) window.dispatchEvent(new CustomEvent("ledgerone:tour-changed"));
+  if (has()) void queryClient.invalidateQueries({ queryKey: appKeys.tour });
 }
 
 // ---------- Onboarding ----------
@@ -316,11 +325,17 @@ export async function loadOnboarding(): Promise<OnboardingState> {
 }
 
 export async function setOnboardingComplete() {
-  await setSetting(ONBOARDING_SETTING_KEY, { complete: true, completedAt: new Date().toISOString() } satisfies OnboardingState);
-  if (has()) window.dispatchEvent(new CustomEvent("ledgerone:onboarding-changed"));
+  await setSetting(ONBOARDING_SETTING_KEY, {
+    complete: true,
+    completedAt: new Date().toISOString(),
+  } satisfies OnboardingState);
+  if (has()) void queryClient.invalidateQueries({ queryKey: appKeys.onboarding });
 }
 
 export async function resetOnboarding() {
-  await setSetting(ONBOARDING_SETTING_KEY, { complete: false, completedAt: null } satisfies OnboardingState);
-  if (has()) window.dispatchEvent(new CustomEvent("ledgerone:onboarding-changed"));
+  await setSetting(ONBOARDING_SETTING_KEY, {
+    complete: false,
+    completedAt: null,
+  } satisfies OnboardingState);
+  if (has()) void queryClient.invalidateQueries({ queryKey: appKeys.onboarding });
 }

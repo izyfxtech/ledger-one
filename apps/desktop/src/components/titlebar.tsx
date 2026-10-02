@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Minus, Square, Copy, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { maximizedQuery } from "@/lib/window";
 
 // The window is created with `decorations: false` (see tauri.conf.json) so
 // we can draw our own titlebar that actually respects the app's light/dark
@@ -17,20 +18,7 @@ const appWindow = (() => {
 })();
 
 export function Titlebar() {
-  const [maximized, setMaximized] = useState(false);
-
-  useEffect(() => {
-    if (!appWindow) return;
-    let cancelled = false;
-    appWindow.isMaximized().then((v) => { if (!cancelled) setMaximized(v); }).catch(() => {});
-    const unlisten = appWindow.onResized(() => {
-      appWindow.isMaximized().then((v) => { if (!cancelled) setMaximized(v); }).catch(() => {});
-    });
-    return () => {
-      cancelled = true;
-      unlisten.then((f) => f()).catch(() => {});
-    };
-  }, []);
+  const { data: maximized = false } = useQuery(maximizedQuery);
 
   if (!appWindow) return null;
 
@@ -47,7 +35,10 @@ export function Titlebar() {
         <TitlebarButton label="Minimize" onClick={() => appWindow.minimize()}>
           <Minus className="size-3.5" />
         </TitlebarButton>
-        <TitlebarButton label={maximized ? "Restore" : "Maximize"} onClick={() => appWindow.toggleMaximize()}>
+        <TitlebarButton
+          label={maximized ? "Restore" : "Maximize"}
+          onClick={() => appWindow.toggleMaximize()}
+        >
           {maximized ? <Copy className="size-3" /> : <Square className="size-3" />}
         </TitlebarButton>
         <TitlebarButton label="Close" onClick={() => appWindow.close()} danger>

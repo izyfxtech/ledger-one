@@ -7,6 +7,10 @@ pnpm-debug.log*
 # Dependencies / build output
 node_modules
 dist
+dist-web
+.env
+.env.*
+!.env.example
 *.local
 
 # Rust build artifacts (src-tauri/ has its own .gitignore for

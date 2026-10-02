@@ -15,13 +15,7 @@ export type Domain = {
 };
 
 export type ObjectKind =
-  | "account"
-  | "cash"
-  | "wallet"
-  | "investment"
-  | "credit_card"
-  | "loan"
-  | "mortgage";
+  "account" | "cash" | "wallet" | "investment" | "credit_card" | "loan" | "mortgage";
 
 export type FinancialObject = {
   id: string;
@@ -103,7 +97,10 @@ export type Transaction = {
     | "loan_disbursement"
     | "loan_repayment"
     | "interest"
-    | "fx";
+    | "fx"
+    // Starting balance recorded at onboarding / account creation. It puts
+    // money in an account but is not income, so cash-flow reports skip it.
+    | "opening";
   status?: TransactionStatus;
   notes?: string;
   entries: Entry[];
@@ -119,8 +116,18 @@ export type WorkspaceSettings = {
   workspaceName: string;
   defaultCurrency: CurrencyCode;
   fiscalYearStart:
-    | "January" | "February" | "March" | "April" | "May" | "June"
-    | "July" | "August" | "September" | "October" | "November" | "December";
+    | "January"
+    | "February"
+    | "March"
+    | "April"
+    | "May"
+    | "June"
+    | "July"
+    | "August"
+    | "September"
+    | "October"
+    | "November"
+    | "December";
   timezone: string;
   theme: "light" | "dark" | "system";
   density: "comfortable" | "compact";

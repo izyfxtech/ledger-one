@@ -81,7 +81,13 @@ describe("void transactions are excluded from every balance/aggregate selector",
       kind: "expense",
       status: "cleared",
       entries: [
-        { objectId: "obj_checking", amount: -100, categoryId: "cat_groceries", allocationId: "alloc_fun", goalId: "goal_trip" },
+        {
+          objectId: "obj_checking",
+          amount: -100,
+          categoryId: "cat_groceries",
+          allocationId: "alloc_fun",
+          goalId: "goal_trip",
+        },
       ],
     };
     const voidTxn: Transaction = {
@@ -91,7 +97,13 @@ describe("void transactions are excluded from every balance/aggregate selector",
       kind: "expense",
       status: "void",
       entries: [
-        { objectId: "obj_checking", amount: -100, categoryId: "cat_groceries", allocationId: "alloc_fun", goalId: "goal_trip" },
+        {
+          objectId: "obj_checking",
+          amount: -100,
+          categoryId: "cat_groceries",
+          allocationId: "alloc_fun",
+          goalId: "goal_trip",
+        },
       ],
     };
     return {
@@ -99,11 +111,28 @@ describe("void transactions are excluded from every balance/aggregate selector",
       fx: [],
       domains: [{ id: "dom_personal", name: "Personal", kind: "personal" }],
       objects: [
-        { id: "obj_checking", domainId: "dom_personal", name: "Checking", kind: "account", currency: "USD" },
+        {
+          id: "obj_checking",
+          domainId: "dom_personal",
+          name: "Checking",
+          kind: "account",
+          currency: "USD",
+        },
       ],
       categories: [{ id: "cat_groceries", name: "Groceries", type: "expense" }],
-      allocations: [{ id: "alloc_fun", domainId: "dom_personal", name: "Fun money", targetCurrency: "USD" }],
-      goals: [{ id: "goal_trip", domainId: "dom_personal", name: "Trip", target: 1000, currency: "USD", deadline: "2027-01-01" }],
+      allocations: [
+        { id: "alloc_fun", domainId: "dom_personal", name: "Fun money", targetCurrency: "USD" },
+      ],
+      goals: [
+        {
+          id: "goal_trip",
+          domainId: "dom_personal",
+          name: "Trip",
+          target: 1000,
+          currency: "USD",
+          deadline: "2027-01-01",
+        },
+      ],
       budgets: [
         {
           id: "bud_march",
@@ -137,9 +166,30 @@ describe("void transactions are excluded from every balance/aggregate selector",
 
   it("goalProgress excludes the void transaction", () => {
     const state = baseState();
-    const { current } = goalProgress(state, "goal_trip");
-    // goalProgress sums Math.abs(amount), so 100 (cleared only), not 200.
-    expect(current).toBe(100);
+    // Progress is the SIGNED sum of goal-tagged entries (a withdrawal lowers
+    // it), never below zero. The fixture's cleared -100 and void -100 net to
+    // -100, which clamps to 0 - and the void leg is not counted.
+    expect(goalProgress(state, "goal_trip").current).toBe(0);
+    // Deposits: cleared +100 counts, void +100 does not.
+    state.transactions = [
+      {
+        id: "d1",
+        date: "2026-03-02",
+        description: "deposit",
+        kind: "income",
+        status: "cleared",
+        entries: [{ objectId: "obj_checking", amount: 100, goalId: "goal_trip" }],
+      },
+      {
+        id: "d2",
+        date: "2026-03-03",
+        description: "void deposit",
+        kind: "income",
+        status: "void",
+        entries: [{ objectId: "obj_checking", amount: 100, goalId: "goal_trip" }],
+      },
+    ];
+    expect(goalProgress(state, "goal_trip").current).toBe(100);
   });
 
   it("budgetSpent excludes the void transaction", () => {
@@ -158,13 +208,15 @@ describe("void transactions are excluded from every balance/aggregate selector",
     // These power list/ledger views, not totals — voiding something
     // should leave a visible audit trail, not hide it.
     const state = baseState();
-    expect(transactionsByDomain(state, "dom_personal").map((t) => t.id).sort()).toEqual([
-      "tx_cleared",
-      "tx_void",
-    ]);
-    expect(transactionsForObject(state, "obj_checking").map((t) => t.id).sort()).toEqual([
-      "tx_cleared",
-      "tx_void",
-    ]);
+    expect(
+      transactionsByDomain(state, "dom_personal")
+        .map((t) => t.id)
+        .sort(),
+    ).toEqual(["tx_cleared", "tx_void"]);
+    expect(
+      transactionsForObject(state, "obj_checking")
+        .map((t) => t.id)
+        .sort(),
+    ).toEqual(["tx_cleared", "tx_void"]);
   });
 });

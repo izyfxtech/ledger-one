@@ -5,7 +5,7 @@
 // NEVER imported by the shipped frontend or by Rust. It depends on
 // better-sqlite3, a native Node addon that cannot run inside the Tauri
 // webview. The Rust side re-executes the exact same SQL files via
-// `include_str!` (see src-tauri/src/main.rs).
+// `include_str!` (see `MIGRATIONS` in src-tauri/src/db.rs).
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

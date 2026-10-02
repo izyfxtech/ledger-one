@@ -30,8 +30,8 @@ describe("queries.ts invoke wrappers", () => {
     await db.selectLedgerState();
     expect(invokeMock).toHaveBeenLastCalledWith("db_select_ledger_state");
 
-    await db.ensureSeeded();
-    expect(invokeMock).toHaveBeenLastCalledWith("db_ensure_seeded");
+    await db.ensureInitialized();
+    expect(invokeMock).toHaveBeenLastCalledWith("db_ensure_initialized");
 
     await db.resetWorkspace();
     expect(invokeMock).toHaveBeenLastCalledWith("db_reset_workspace");
@@ -53,7 +53,11 @@ describe("queries.ts invoke wrappers", () => {
       // not "leave alone", and would be silently dropped by
       // JSON.stringify if not translated to null before invoke() sends it.
       const db = await import("@/lib/db/queries");
-      await db.updateDomain("dom1", { name: "x", description: undefined, displayCurrency: undefined });
+      await db.updateDomain("dom1", {
+        name: "x",
+        description: undefined,
+        displayCurrency: undefined,
+      });
       const [, args] = invokeMock.mock.calls.at(-1)!;
       expect(args).toEqual({
         id: "dom1",

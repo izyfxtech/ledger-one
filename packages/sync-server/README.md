@@ -1,3 +1,7 @@
+> **DEPRECATED.** The desktop and web apps now sync through Supabase (see `docs/CLOUD.md`) and no longer
+> use this server. It is kept only for reference and will not receive fixes. Known issue if you ever run it: it
+> creates an account row for any unauthenticated pull request.
+
 # @ledgerone/sync-server
 
 A minimal, self-hostable relay for LedgerOne's optional cross-device sync.

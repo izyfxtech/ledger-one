@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { useSelector } from "@tanstack/react-store";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,15 +10,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { useLedger, type CurrencyCode } from "@/lib/ledger";
-import type { LedgerState, ObjectKind } from "@/lib/ledger/types";
 import {
-  loadOnboarding,
-  setOnboardingComplete,
-  loadDisplayName,
-  saveDisplayName,
-  startTour,
-} from "@/lib/local-store";
+  DEFAULT_SETTINGS,
+  useLedgerActions,
+  useLedgerState,
+  type CurrencyCode,
+} from "@/lib/ledger";
+import { draft, draftStore, resetDraft, type DraftAccount } from "@/lib/onboarding-draft";
+import { todayLocal } from "@/lib/dates";
+import type { LedgerState, ObjectKind } from "@/lib/ledger/types";
+import { setOnboardingComplete, saveDisplayName, startTour } from "@/lib/local-store";
 import { toast } from "sonner";
 import {
   Check,
@@ -76,8 +78,8 @@ const CATEGORY_GROUPS: CategoryGroup[] = [
     label: "Income",
     hint: "Where money comes from",
     categories: [
-      { name: "Salary", type: "income", enabled: true },
-      { name: "Freelance", type: "income", enabled: true },
+      { name: "Salary", type: "income", enabled: false },
+      { name: "Freelance", type: "income", enabled: false },
       { name: "Investments", type: "income", enabled: false },
       { name: "Gifts", type: "income", enabled: false },
     ],
@@ -87,10 +89,10 @@ const CATEGORY_GROUPS: CategoryGroup[] = [
     label: "Essentials",
     hint: "Bills and living costs",
     categories: [
-      { name: "Rent", type: "expense", enabled: true },
-      { name: "Utilities", type: "expense", enabled: true },
-      { name: "Groceries", type: "expense", enabled: true },
-      { name: "Transport", type: "expense", enabled: true },
+      { name: "Rent", type: "expense", enabled: false },
+      { name: "Utilities", type: "expense", enabled: false },
+      { name: "Groceries", type: "expense", enabled: false },
+      { name: "Transport", type: "expense", enabled: false },
       { name: "Healthcare", type: "expense", enabled: false },
       { name: "Insurance", type: "expense", enabled: false },
     ],
@@ -100,8 +102,8 @@ const CATEGORY_GROUPS: CategoryGroup[] = [
     label: "Lifestyle",
     hint: "Discretionary spending",
     categories: [
-      { name: "Dining", type: "expense", enabled: true },
-      { name: "Entertainment", type: "expense", enabled: true },
+      { name: "Dining", type: "expense", enabled: false },
+      { name: "Entertainment", type: "expense", enabled: false },
       { name: "Shopping", type: "expense", enabled: false },
       { name: "Travel", type: "expense", enabled: false },
       { name: "Subscriptions", type: "expense", enabled: false },
@@ -120,174 +122,124 @@ const CATEGORY_GROUPS: CategoryGroup[] = [
   },
 ];
 
-type DraftAccount = {
-  name: string;
-  kind: ObjectKind;
-  currency: CurrencyCode;
-  balance: string;
-  institution?: string;
-};
-
 function rid(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
-export function OnboardingGate({ children }: { children: ReactNode }) {
-  const [open, setOpen] = useState<boolean | null>(null); // null = checking
+/** Route loader hook: start every run from a clean draft. */
+export const startOnboardingDraft = () => resetDraft(CATEGORY_GROUPS);
 
-  useEffect(() => {
-    let cancelled = false;
-    const sync = () => {
-      loadOnboarding().then((s) => {
-        if (!cancelled) setOpen(!s.complete);
-      });
-    };
-    sync();
-    window.addEventListener("ledgerone:onboarding-changed", sync);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("ledgerone:onboarding-changed", sync);
-    };
-  }, []);
-
-  if (open === null) return <div className="h-full bg-background" />;
-
-  return (
-    <>
-      {children}
-      {open && <OnboardingWizard onDone={() => setOpen(false)} />}
-    </>
+export function OnboardingPage() {
+  const state = useLedgerState();
+  const { replaceState } = useLedgerActions();
+  const navigate = useNavigate();
+  const { step, displayName, defaultCurrency, enabledCurrencies, groups, accounts } = useSelector(
+    draftStore,
+    (s) => s,
   );
-}
-
-function OnboardingWizard({ onDone }: { onDone: () => void }) {
-  const { state, replaceState, ready } = useLedger();
-  const [step, setStep] = useState(0);
-
-  // Display name — just what the app calls the user. Nickname is fine.
-  const [displayName, setDisplayName] = useState<string>(() => loadDisplayName());
-
-  // Currency — the app's foundation.
-  const [defaultCurrency, setDefaultCurrency] = useState<CurrencyCode>("USD");
-  const [enabledCurrencies, setEnabledCurrencies] = useState<CurrencyCode[]>([
-    "USD",
-  ]);
-
-  // Categories — grouped for scan-ability.
-  const [groups, setGroups] = useState<CategoryGroup[]>(() =>
-    // Deep clone so state mutations don't leak into the module-level default.
-    CATEGORY_GROUPS.map((g) => ({
-      ...g,
-      categories: g.categories.map((c) => ({ ...c })),
-    })),
-  );
-
-  // Accounts — start empty. Users add what they actually have.
-  const [accounts, setAccounts] = useState<DraftAccount[]>([]);
+  const {
+    setStep,
+    setDisplayName,
+    setDefaultCurrency,
+    setEnabledCurrencies,
+    setGroups,
+    setAccounts,
+  } = draft;
 
   const steps = ["Welcome", "Name", "Currency", "Categories", "Accounts", "Finish"] as const;
 
   const canNext = (() => {
     if (step === 1) return displayName.trim().length > 0;
     if (step === 2) return enabledCurrencies.length > 0;
-    if (step === 4)
-      return accounts.every((a) => a.name.trim().length > 0);
+    if (step === 4) return accounts.every((a) => a.name.trim().length > 0);
     return true;
   })();
 
-  const selectedCategoryCount = useMemo(
-    () =>
-      groups.reduce(
-        (sum, g) => sum + g.categories.filter((c) => c.enabled).length,
-        0,
-      ),
-    [groups],
+  const selectedCategoryCount = groups.reduce(
+    (sum, g) => sum + g.categories.filter((c) => c.enabled).length,
+    0,
   );
 
   async function finish(skip = false) {
     try {
-      if (!skip) {
-        const personalDomainId = "personal";
-
-        const objects = accounts
-          .filter((a) => a.name.trim().length > 0)
-          .map((a) => ({
-            id: rid("obj"),
-            domainId: personalDomainId,
-            name: a.name.trim(),
-            institution: a.institution?.trim() || undefined,
-            kind: a.kind,
-            currency: a.currency,
-          }));
-
-        const cats = groups.flatMap((g) =>
-          g.categories
-            .filter((c) => c.enabled && c.name.trim().length > 0)
-            .map((c) => ({
-              id: rid("cat"),
-              name: c.name.trim(),
-              type: c.type,
-            })),
-        );
-
-        // Opening balance transactions for accounts with non-zero balances.
-        const openingTxs = accounts
-          .map((a, i) => {
-            if (!a.name.trim()) return null;
-            const amt = Number(a.balance);
-            if (!Number.isFinite(amt) || amt === 0) return null;
-            return {
-              id: rid("tx"),
-              date: new Date().toISOString().slice(0, 10),
-              description: "Opening balance",
-              kind: "income" as const,
-              status: "cleared" as const,
-              entries: [{ objectId: objects[i].id, amount: amt }],
-            };
-          })
-          .filter((t): t is NonNullable<typeof t> => t != null);
-
-        const currencies = enabledCurrencies.includes(defaultCurrency)
-          ? enabledCurrencies
-          : [defaultCurrency, ...enabledCurrencies];
-
-        const next: LedgerState = {
-          currencies,
-          fx: state.fx ?? [],
-          domains: [
-            { id: personalDomainId, name: "Personal", kind: "personal" },
-          ],
-          objects,
-          categories: cats,
-          allocations: [],
-          goals: [],
-          budgets: [],
-          transactions: openingTxs,
-          settings: {
-            workspaceName: state.settings?.workspaceName ?? "My Workspace",
-            defaultCurrency,
-            fiscalYearStart: state.settings?.fiscalYearStart ?? "January",
-            timezone: state.settings?.timezone ?? "UTC",
-            theme: state.settings?.theme ?? "light",
-            density: state.settings?.density ?? "comfortable",
-          },
-        };
-
-        await replaceState(next);
-        saveDisplayName(displayName);
+      // Skip only marks onboarding complete. The app no longer creates demo
+      // data, so there is nothing to clean up, and — importantly — re-running
+      // onboarding from Settings and skipping must not touch existing data.
+      if (skip) {
+        await setOnboardingComplete();
+        toast.success("You can set things up later");
+        await navigate({ to: "/" });
+        return;
       }
 
+      const named = accounts.filter((a) => a.name.trim().length > 0);
+      const objects = named.map((a) => ({
+        id: rid("obj"),
+        domainId: "personal",
+        name: a.name.trim(),
+        institution: a.institution?.trim() || undefined,
+        kind: a.kind,
+        currency: a.currency,
+      }));
+
+      const cats = groups.flatMap((g) =>
+        g.categories
+          .filter((c) => c.enabled && c.name.trim().length > 0)
+          .map((c) => ({ id: rid("cat"), name: c.name.trim(), type: c.type })),
+      );
+
+      // Opening balances. `objects` is built from the same filtered list as
+      // `named`, so the indexes line up (the old code indexed the unfiltered
+      // list, which misattached balances after a blank-named row).
+      const openingTxs = named
+        .map((a, i) => {
+          const typed = Number(a.balance);
+          if (!Number.isFinite(typed) || typed === 0) return null;
+          // Entries are signed: money owed on a loan/mortgage/card is stored
+          // as a negative balance, matching every selector.
+          const owes = a.kind === "loan" || a.kind === "mortgage" || a.kind === "credit_card";
+          return {
+            id: rid("tx"),
+            date: todayLocal(),
+            description: "Opening balance",
+            kind: "opening" as const, // a starting balance is not income: cash-flow reports skip it
+            status: "cleared" as const,
+            entries: [{ objectId: objects[i].id, amount: owes ? -Math.abs(typed) : typed }],
+          };
+        })
+        .filter((t): t is NonNullable<typeof t> => t != null);
+
+      const currency = defaultCurrency;
+      const currencies = enabledCurrencies.includes(currency)
+        ? enabledCurrencies
+        : [currency, ...enabledCurrencies];
+
+      const next: LedgerState = {
+        currencies,
+        fx: state.fx ?? [],
+        domains: [{ id: "personal", name: "Personal", kind: "personal" }],
+        objects,
+        categories: cats,
+        allocations: [],
+        goals: [],
+        budgets: [],
+        transactions: openingTxs,
+        // One source for defaults — onboarding used UTC/USD while Settings
+        // used Africa/Lagos/NGN.
+        settings: { ...DEFAULT_SETTINGS, ...(state.settings ?? {}), defaultCurrency: currency },
+      };
+
+      await replaceState(next);
+      saveDisplayName(displayName);
       await setOnboardingComplete();
-      if (!skip) await startTour();
-      toast.success(skip ? "You can set things up later" : `Welcome, ${displayName.trim() || "friend"}`);
-      onDone();
+      await startTour();
+      toast.success(`Welcome, ${displayName.trim() || "friend"}`);
+      await navigate({ to: "/" });
     } catch (err) {
       console.error("[onboarding] finish failed:", err);
       toast.error("Failed to save workspace");
     }
   }
-
-  if (!ready) return null;
 
   return (
     // z-50 keeps Radix Select portals (also z-50, appended later in the DOM)
@@ -304,20 +256,12 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
               <div key={label} className="flex-1">
                 <div
                   className={`h-1 rounded-full transition-colors duration-300 ${
-                    done
-                      ? "bg-primary"
-                      : active
-                        ? "bg-primary/60"
-                        : "bg-muted"
+                    done ? "bg-primary" : active ? "bg-primary/60" : "bg-muted"
                   }`}
                 />
                 <div
                   className={`mt-2 text-[10px] uppercase tracking-widest text-center transition-colors ${
-                    active
-                      ? "text-foreground"
-                      : done
-                        ? "text-primary"
-                        : "text-muted-foreground"
+                    active ? "text-foreground" : done ? "text-primary" : "text-muted-foreground"
                   }`}
                 >
                   {label}
@@ -330,9 +274,7 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
         <div className="rounded-2xl border bg-card p-8 shadow-sm min-h-[420px]">
           {step === 0 && <StepWelcome />}
 
-          {step === 1 && (
-            <StepName value={displayName} onChange={setDisplayName} />
-          )}
+          {step === 1 && <StepName value={displayName} onChange={setDisplayName} />}
 
           {step === 2 && (
             <StepCurrency
@@ -340,9 +282,7 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
               enabledCurrencies={enabledCurrencies}
               onDefaultChange={(c) => {
                 setDefaultCurrency(c);
-                setEnabledCurrencies((prev) =>
-                  prev.includes(c) ? prev : [...prev, c],
-                );
+                setEnabledCurrencies((prev) => (prev.includes(c) ? prev : [...prev, c]));
               }}
               onToggle={(c) =>
                 setEnabledCurrencies((prev) => {
@@ -392,10 +332,7 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
                     i === gi
                       ? {
                           ...g,
-                          categories: [
-                            ...g.categories,
-                            { name: "", type, enabled: true },
-                          ],
+                          categories: [...g.categories, { name: "", type, enabled: true }],
                         }
                       : g,
                   ),
@@ -407,9 +344,7 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
                     i === gi
                       ? {
                           ...g,
-                          categories: g.categories.map((c, j) =>
-                            j === ci ? { ...c, name } : c,
-                          ),
+                          categories: g.categories.map((c, j) => (j === ci ? { ...c, name } : c)),
                         }
                       : g,
                   ),
@@ -456,19 +391,13 @@ function OnboardingWizard({ onDone }: { onDone: () => void }) {
           </Button>
           <div className="flex gap-2">
             {step > 0 && (
-              <Button
-                variant="outline"
-                onClick={() => setStep((s) => s - 1)}
-              >
+              <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
                 <ChevronLeft className="h-4 w-4" />
                 Back
               </Button>
             )}
             {step < steps.length - 1 ? (
-              <Button
-                disabled={!canNext}
-                onClick={() => setStep((s) => s + 1)}
-              >
+              <Button disabled={!canNext} onClick={() => setStep((s) => s + 1)}>
                 Continue
                 <ChevronRight className="h-4 w-4" />
               </Button>
@@ -496,13 +425,11 @@ function StepWelcome() {
         <Sparkles className="h-3 w-3" />
         Welcome
       </div>
-      <h1 className="text-3xl font-semibold tracking-tight">
-        A ledger that stays on your device.
-      </h1>
+      <h1 className="text-3xl font-semibold tracking-tight">A ledger that stays on your device.</h1>
       <p className="text-muted-foreground leading-relaxed">
-        A few quick choices and you're in. Tell us what to call you, pick your
-        currencies, choose categories to track, and add any accounts you have.
-        Everything can be changed later from Settings.
+        A few quick choices and you're in. Tell us what to call you, pick your currencies, choose
+        categories to track, and add any accounts you have. Everything can be changed later from
+        Settings.
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
         {[
@@ -511,13 +438,8 @@ function StepWelcome() {
           { n: "3", t: "Categories", d: "What to track" },
           { n: "4", t: "Accounts", d: "Optional to start" },
         ].map((s) => (
-          <div
-            key={s.n}
-            className="rounded-lg border bg-muted/20 p-4"
-          >
-            <div className="text-2xl font-mono text-muted-foreground">
-              {s.n}
-            </div>
+          <div key={s.n} className="rounded-lg border bg-muted/20 p-4">
+            <div className="text-2xl font-mono text-muted-foreground">{s.n}</div>
             <div className="mt-2 text-sm font-medium">{s.t}</div>
             <div className="text-xs text-muted-foreground">{s.d}</div>
           </div>
@@ -527,13 +449,7 @@ function StepWelcome() {
   );
 }
 
-function StepName({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
+function StepName({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div className="space-y-6">
       <Header
@@ -545,7 +461,7 @@ function StepName({
         <Input
           id="onboarding-display-name"
           autoFocus
-          placeholder="e.g. Alex, Sam, Kiwi, Money Boss"
+          placeholder="What should we call you?"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           maxLength={40}
@@ -568,7 +484,6 @@ function StepName({
     </div>
   );
 }
-
 
 function StepCurrency({
   defaultCurrency,
@@ -597,9 +512,7 @@ function StepCurrency({
           <SelectContent>
             {CURRENCIES.map((c) => (
               <SelectItem key={c.code} value={c.code}>
-                <span className="font-mono text-muted-foreground mr-2">
-                  {c.symbol}
-                </span>
+                <span className="font-mono text-muted-foreground mr-2">{c.symbol}</span>
                 {c.code} — {c.label}
               </SelectItem>
             ))}
@@ -620,20 +533,14 @@ function StepCurrency({
                 onClick={() => onToggle(c.code)}
                 disabled={isDefault}
                 className={`flex items-center justify-between rounded-lg border px-3 py-2.5 text-left transition-colors ${
-                  on
-                    ? "bg-primary/10 border-primary/40"
-                    : "bg-background hover:bg-muted"
+                  on ? "bg-primary/10 border-primary/40" : "bg-background hover:bg-muted"
                 } ${isDefault ? "opacity-100 cursor-default" : ""}`}
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-mono w-6 text-center">
-                    {c.symbol}
-                  </span>
+                  <span className="font-mono w-6 text-center">{c.symbol}</span>
                   <div>
                     <div className="text-sm font-medium">{c.code}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {c.label}
-                    </div>
+                    <div className="text-xs text-muted-foreground">{c.label}</div>
                   </div>
                 </div>
                 {on && (
@@ -689,9 +596,7 @@ function StepCategories({
               <div className="flex items-baseline justify-between">
                 <div>
                   <div className="text-sm font-semibold">{g.label}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {g.hint}
-                  </div>
+                  <div className="text-xs text-muted-foreground">{g.hint}</div>
                 </div>
                 <button
                   type="button"
@@ -808,36 +713,26 @@ function StepAccounts({
       ) : (
         <div className="space-y-3">
           {accounts.map((a, i) => {
-            const KindIcon =
-              ACCOUNT_KINDS.find((k) => k.value === a.kind)?.icon ?? Wallet;
+            const KindIcon = ACCOUNT_KINDS.find((k) => k.value === a.kind)?.icon ?? Wallet;
             return (
-              <div
-                key={i}
-                className="rounded-lg border bg-muted/10 p-3 space-y-3"
-              >
+              <div key={i} className="rounded-lg border bg-muted/10 p-3 space-y-3">
                 <div className="flex items-center gap-2">
                   <div className="rounded-md bg-muted p-2">
                     <KindIcon className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <Input
-                    placeholder="Account name (e.g. Chase Checking)"
+                    placeholder="Account name"
                     value={a.name}
                     onChange={(e) => {
                       const v = e.target.value;
-                      onChange(
-                        accounts.map((x, j) =>
-                          j === i ? { ...x, name: v } : x,
-                        ),
-                      );
+                      onChange(accounts.map((x, j) => (j === i ? { ...x, name: v } : x)));
                     }}
                     className="flex-1"
                   />
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() =>
-                      onChange(accounts.filter((_, j) => j !== i))
-                    }
+                    onClick={() => onChange(accounts.filter((_, j) => j !== i))}
                     aria-label="Remove account"
                   >
                     <Trash2 className="h-4 w-4" />
@@ -852,9 +747,7 @@ function StepAccounts({
                       value={a.kind}
                       onValueChange={(v) =>
                         onChange(
-                          accounts.map((x, j) =>
-                            j === i ? { ...x, kind: v as ObjectKind } : x,
-                          ),
+                          accounts.map((x, j) => (j === i ? { ...x, kind: v as ObjectKind } : x)),
                         )
                       }
                     >
@@ -880,9 +773,7 @@ function StepAccounts({
                       onValueChange={(v) =>
                         onChange(
                           accounts.map((x, j) =>
-                            j === i
-                              ? { ...x, currency: v as CurrencyCode }
-                              : x,
+                            j === i ? { ...x, currency: v as CurrencyCode } : x,
                           ),
                         )
                       }
@@ -891,14 +782,13 @@ function StepAccounts({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(enabledCurrencies.length
-                          ? enabledCurrencies
-                          : [defaultCurrency]
-                        ).map((c) => (
-                          <SelectItem key={c} value={c}>
-                            {c}
-                          </SelectItem>
-                        ))}
+                        {(enabledCurrencies.length ? enabledCurrencies : [defaultCurrency]).map(
+                          (c) => (
+                            <SelectItem key={c} value={c}>
+                              {c}
+                            </SelectItem>
+                          ),
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -912,11 +802,7 @@ function StepAccounts({
                       value={a.balance}
                       onChange={(e) => {
                         const v = e.target.value;
-                        onChange(
-                          accounts.map((x, j) =>
-                            j === i ? { ...x, balance: v } : x,
-                          ),
-                        );
+                        onChange(accounts.map((x, j) => (j === i ? { ...x, balance: v } : x)));
                       }}
                     />
                   </div>
@@ -966,18 +852,9 @@ function StepFinish({
         hint="Here's what we're setting up. You can change any of this from Settings."
       />
       <div className="rounded-lg border divide-y">
-        <SummaryRow
-          label="Default currency"
-          value={defaultCurrency}
-        />
-        <SummaryRow
-          label="Enabled currencies"
-          value={enabledCurrencies.join(", ") || "—"}
-        />
-        <SummaryRow
-          label="Categories"
-          value={`${categoriesCount} selected`}
-        />
+        <SummaryRow label="Default currency" value={defaultCurrency} />
+        <SummaryRow label="Enabled currencies" value={enabledCurrencies.join(", ") || "—"} />
+        <SummaryRow label="Categories" value={`${categoriesCount} selected`} />
         <SummaryRow
           label="Accounts"
           value={accountsCount ? `${accountsCount} added` : "None yet"}
@@ -985,8 +862,7 @@ function StepFinish({
       </div>
       <p className="text-xs text-muted-foreground">
         Set a PIN, rename your workspace, or add businesses from{" "}
-        <span className="font-medium text-foreground">Settings</span> once
-        you're in.
+        <span className="font-medium text-foreground">Settings</span> once you're in.
       </p>
     </div>
   );
@@ -996,15 +872,7 @@ function StepFinish({
 // Primitives
 // -----------------------------------------------------------------------------
 
-function Header({
-  title,
-  hint,
-  aside,
-}: {
-  title: string;
-  hint: string;
-  aside?: string;
-}) {
+function Header({ title, hint, aside }: { title: string; hint: string; aside?: string }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div>

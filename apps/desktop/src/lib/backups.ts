@@ -14,7 +14,7 @@ export type BackupRecord = {
   id: string;
   name: string;
   createdAt: string; // ISO
-  size: number;      // bytes of the serialized state
+  size: number; // bytes of the serialized state
   version: number;
   state: LedgerState;
 };

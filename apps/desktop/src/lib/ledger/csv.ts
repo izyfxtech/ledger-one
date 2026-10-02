@@ -44,7 +44,18 @@ export function transactionsToCsv(state: LedgerState): string {
     }
   }
   return toCsv(
-    ["Date", "Description", "Kind", "Status", "Domain", "Account", "Category", "Amount", "Currency", "Notes"],
+    [
+      "Date",
+      "Description",
+      "Kind",
+      "Status",
+      "Domain",
+      "Account",
+      "Category",
+      "Amount",
+      "Currency",
+      "Notes",
+    ],
     rows,
   );
 }
