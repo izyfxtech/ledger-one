@@ -12,9 +12,6 @@
     "tauri:dev": "pnpm --filter @ledgerone/desktop tauri:dev",
     "tauri:build": "pnpm --filter @ledgerone/desktop tauri:build"
   },
-  "overrides": {
-    "postcss": "8.5.19"
-  },
   "workspaces": [
     "apps/*",
     "packages/*"
